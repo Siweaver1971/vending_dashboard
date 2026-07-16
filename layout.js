@@ -71,15 +71,9 @@ export function buildCsv(headers, rows) {
   return lines.join('\r\n') + '\r\n';
 }
 
-/** Triggers a browser download of a CSV string. */
-export function downloadCsv(filename, csvText) {
-  const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
+/** Supabase's REST API caps every response at 1000 rows (PostgREST's
+ * db-max-rows project setting) regardless of any LIMIT inside the RPC
+ * function itself. Our detail RPCs (get_vended_detail / get_invoiced_detail)
+ * are built to return up to 20,000 rows, so this pages through with
+ * .range() until either the cap is hit or a short page comes back. */
+export async function fetchAllRpc(fn, params,

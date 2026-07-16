@@ -22,7 +22,7 @@
 </main>
 
 <script type="module">
-import { supabase, renderNav, money, buildCsv, downloadCsv } from './layout.js';
+import { supabase, renderNav, money, buildCsv, downloadCsv, fetchAllRpc } from './layout.js';
 import { renderSlicer } from './slicer.js';
 
 renderNav('invoiced');
@@ -59,7 +59,7 @@ function toNullIfEmpty(arr) {
 async function runQuery() {
   resultBody.innerHTML = '<p class="loading">Loading…</p>';
 
-  const { data, error } = await supabase.rpc('get_invoiced_detail', {
+  const { data, error } = await fetchAllRpc('get_invoiced_detail', {
     p_sites: toNullIfEmpty(siteSlicer.getSelected()),
     p_groups: toNullIfEmpty(groupSlicer.getSelected()),
     p_periods: toNullIfEmpty(periodSlicer.getSelected()),
@@ -139,5 +139,4 @@ document.getElementById('apply-btn').addEventListener('click', runQuery);
   await runQuery();
 })();
 </script>
-</body>
-</html>
+</bo
