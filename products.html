@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Products — Vending Dashboard</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="topbar-root"></div>
+<main>
+  <h1>Products</h1>
+  <p class="subtitle">Add or edit item code, description, product group and price. Editing an item keeps its price history intact — past reports still use the price that applied at the time of each transaction; the change only applies from today onward.</p>
+
+  <div class="toolbar-row">
+    <input type="text" id="search-box" placeholder="Search by item code or description...">
+    <label class="retired-toggle"><input type="checkbox" id="show-retired"> Show retired items</label>
+    <button type="button" id="add-btn">+ Add New Item</button>
+  </div>
+
+  <div class="item-form-row" id="item-form" style="display:none;">
+    <div>
+      <label for="f-code">Item Code</label>
+      <input type="text" id="f-code" style="min-width:140px;">
+    </div>
+    <div>
+      <label for="f-desc">Description</label>
+      <input type="text" id="f-desc" style="min-width:280px;">
+    </div>
+    <div>
+      <label for="f-group">Product Group</label>
+      <input type="text" id="f-group" list="pg-list" style="min-width:160px;">
+      <datalist id="pg-list"></datalist>
+    </div>
+    <div>
+      <label for="f-price">Price (£)</label>
+      <input type="text" id="f-price" style="min-width:100px;">
+    </div>
+    <div>
+      <button type="button" id="save-btn">Save</button>
+      <button type="button" class="secondary" id="cancel-btn">Cancel</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 id="result-heading">Current items</h2>
+    <div id="result-body"><p class="loading">Loading…</p></div>
+  </div>
+</main>
+
+<script type="module">
+import { supabase, renderNav, money } from './layout.js';
+
+renderNav('products');
+
+const resultBody = document.getElementById('result-body');
+const resultHeading = document.getElementById('result-heading');
+const searchBox = document.getElementById('search-box');
+const showRetired = document.getElementById('show-retired');
+const addBtn = document.getElementById('add-btn');
+const itemForm = document.getElementById('item-form');
+const fCode = document.getElementById('f-code');
+const fDesc = document.getElementById('f-desc');
+const fGroup = document.getElementById('f-group');
+const fPrice = document.getElementById('f-price');
+const saveBtn = document.getElementById('save-btn');
+const cancelBtn = document.getElementById('cancel-btn');
+
+let allItems = [];
+let editingCode = null; // null = adding a new item; string = editing that item_code
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+async function loadItems() {
+  resultBody.innerHTML = '<p class="loading">Loading…</p>';
+
+  const query = showRetired.checked
+    ? supabase.from('items').select('item_code, description, product_group, price, effective_from, effective_to, is_current').order('item_code')
+    : supabase.rpc('get_items_current');
+
+  const { data, error } = await query;
+  if (error) {
+    resultBody.innerHTML = `<p class="empty">Error loading items: ${error.message}</p>`;
+    return;
+  }
+  allItems = data || [];
+
+  const groups = Array.from(new Set(allItems.map((i) => i.product_group).filter(Boolean))).sort();
+  document.getElementById('pg-list').innerHTML = groups.map((g) => `<option value="${esc(g)}">`).join('');
+
+  render();
+}
+
+function render() {
+  const term = (searchBox.value || '').toLowerCase().trim();
+  let rows = allItems;
+  if (term) {
+    rows = rows.filter((r) =>
+      (r.item_code || '').toLowerCase().includes(term) ||
+      (r.description || '').toLowerCase().includes(term));
+  }
+
+  resultHeading.textContent = showRetired.checked
+    ? `All item versions (${rows.length})`
+    : `Current items (${rows.length})`;
+
+  if (rows.length === 0) {
+    resultBody.innerHTML = '<p class="empty">No items match.</p>';
+    return;
+  }
+
+  const showStatusCol = showRetired.checked;
+  const rowsHtml = rows.map((r) => {
+    const isCurrent = r.is_current === undefined ? true : !!r.is_current;
+    const statusCell = showStatusCol
+      ? `<td>${isCurrent ? '<span class="badge" style="background:#dcfce7;color:#166534;">current</span>' : '<span class="badge">retired</span>'}</td>`
+      : '';
+    const actions = isCurrent
+      ? `<button type="button" class="action-link" data-edit="${esc(r.item_code)}">Edit</button>
+         <button type="button" class="action-link danger-link" data-retire="${esc(r.item_code)}">Retire</button>`
+      : '';
+    return `
+      <tr>
+        <td>${esc(r.item_code)}</td>
+        <td>${esc(r.description || '')}</td>
+        <td>${esc(r.product_group || '')}</td>
+        <td class="num">£${money(r.price)}</td>
+        <td>${esc(r.effective_from || '')}</td>
+        ${statusCell}
+        <td>${actions}</td>
+      </tr>`;
+  }).join('');
+
+  resultBody.innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th>Item Code</th><th>Description</th><th>Product Group</th>
+          <th class="num">Price</th><th>Since</th>${showStatusCol ? '<th>Status</th>' : ''}<th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+  `;
+
+  resultBody.querySelectorAll('[data-edit]').forEach((btn) => {
+    btn.addEventListener('click', () => startEdit(btn.dataset.edit));
+  });
+  resultBody.querySelectorAll('[data-retire]').forEach((btn) => {
+    btn.addEventListener('click', () => retireItem(btn.dataset.retire));
+  });
+}
+
+function openForm() {
+  itemForm.style.display = 'flex';
+  addBtn.style.display = 'none';
+}
+function closeForm() {
+  itemForm.style.display = 'none';
+  addBtn.style.display = '';
+  editingCode = null;
+  fCode.value = ''; fDesc.value = ''; fGroup.value = ''; fPrice.value = '';
+  fCode.disabled = false;
+}
+
+function startAdd() {
+  editingCode = null;
+  fCode.value = ''; fDesc.value = ''; fGroup.value = ''; fPrice.value = '';
+  fCode.disabled = false;
+  openForm();
+  fCode.focus();
+}
+
+function startEdit(itemCode) {
+  const item = allItems.find((i) => i.item_code === itemCode && (i.is_current === undefined || i.is_current));
+  if (!item) return;
+  editingCode = itemCode;
+  fCode.value = item.item_code;
+  fDesc.value = item.description || '';
+  fGroup.value = item.product_group || '';
+  fPrice.value = item.price;
+  fCode.disabled = true; // renaming an item code isn't supported here -- retire + add new instead
+  openForm();
+  fDesc.focus();
+}
+
+async function retireItem(itemCode) {
+  if (!confirm(`Retire item ${itemCode}? It will no longer show as current, but past reports are unaffected.`)) return;
+  const { error } = await supabase.rpc('retire_item', { p_item_code: itemCode });
+  if (error) { alert('Error: ' + error.message); return; }
+  await loadItems();
+}
+
+async function saveItem() {
+  const code = fCode.value.trim();
+  const desc = fDesc.value.trim();
+  const group = fGroup.value.trim();
+  const priceNum = parseFloat(fPrice.value);
+
+  if (!code) { alert('Item code is required.'); return; }
+  if (!desc) { alert('Description is required.'); return; }
+  if (Number.isNaN(priceNum) || priceNum < 0) { alert('Enter a valid, non-negative price.'); return; }
+
+  saveBtn.disabled = true;
+  const { error } = await supabase.rpc('upsert_item_version', {
+    p_item_code: code, p_description: desc, p_product_group: group || null, p_price: priceNum,
+  });
+  saveBtn.disabled = false;
+
+  if (error) { alert('Error: ' + error.message); return; }
+  closeForm();
+  await loadItems();
+}
+
+addBtn.addEventListener('click', startAdd);
+cancelBtn.addEventListener('click', closeForm);
+saveBtn.addEventListener('click', saveItem);
+searchBox.addEventListener('input', render);
+showRetired.addEventListener('change', loadItems);
+
+loadItems();
+</script>
+</body>
+</html>
