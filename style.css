@@ -85,3 +85,18 @@ tr.total td { font-weight: 700; border-top: 2px solid #333; }
 }
 .text-filters-grid input, .text-filters-grid select { width: 100%; }
 .run-row { margin-top: 20px; }
+button.secondary { background: #eef0f3; color: #333; }
+button.secondary:hover { background: #e2e4e8; }
+button.danger { background: #fff; color: #b91c1c; border: 1px solid #fca5a5; }
+button.danger:hover { background: #fef2f2; }
+.action-link { background: none; border: none; color: #2563eb; cursor: pointer; font-size: 13px; padding: 2px 6px; }
+.action-link:hover { text-decoration: underline; }
+.action-link.danger-link { color: #b91c1c; }
+.item-form-row {
+  display: flex; gap: 16px; flex-wrap: wrap; align-items: end; background: #f9fafb;
+  padding: 16px; border-radius: 8px; border: 1px solid #e5e7eb; margin-bottom: 20px;
+}
+.item-form-row label { min-width: 140px; }
+.toolbar-row { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+.toolbar-row input[type=text] { flex: 1; min-width: 220px; }
+.retired-toggle { font-size: 13px; color: #555; display: flex; align-items: center; gap: 6px; }
