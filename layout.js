@@ -26,14 +26,14 @@ export function renderNav(active) {
   if (!root) return;
   const links = NAV_ITEMS.map((item) => {
     const cls = item.key === active ? 'active' : '';
-    return \`<a href="\${item.href}" class="\${cls}">\${item.label}</a>\`;
+    return `<a href="${item.href}" class="${cls}">${item.label}</a>`;
   }).join('');
-  root.innerHTML = \`
+  root.innerHTML = `
     <div class="topbar">
       <div class="brand">Vending Dashboard</div>
-      <nav>\${links}</nav>
+      <nav>${links}</nav>
     </div>
-  \`;
+  `;
 }
 
 /** Formats a number the way PHP's float-to-string / fputcsv does: fixed
