@@ -16,6 +16,7 @@ const NAV_ITEMS = [
   { key: 'vended', href: 'vended.html', label: 'Vended' },
   { key: 'invoiced', href: 'invoiced.html', label: 'Invoiced' },
   { key: 'reports', href: 'reports.html', label: 'Report Builder' },
+  { key: 'products', href: 'products.html', label: 'Products' },
 ];
 
 export function renderNav(active) {
