@@ -18,25 +18,16 @@ const NAV_ITEMS = [
   { key: 'reports', href: 'reports.html', label: 'Report Builder' },
 ];
 
-/** Renders the shared top navigation bar into #topbar-root. Call once per page. */
 export function renderNav(active) {
   const root = document.getElementById('topbar-root');
   if (!root) return;
   const links = NAV_ITEMS.map((item) => {
     const cls = item.key === active ? 'active' : '';
-    return `<a href="${item.href}" class="${cls}">${item.label}</a>`;
+    return '<a href="' + item.href + '" class="' + cls + '">' + item.label + '</a>';
   }).join('');
-  root.innerHTML = `
-    <div class="topbar">
-      <div class="brand">Vending Dashboard</div>
-      <nav>${links}</nav>
-    </div>
-  `;
+  root.innerHTML = '<div class="topbar"><div class="brand">Vending Dashboard</div><nav>' + links + '</nav></div>';
 }
 
-/** Formats a number the way PHP's float-to-string / fputcsv does: fixed
- * decimal places for display, but trailing zeros dropped for CSV export
- * (so 240.30 becomes "240.3", matching the original JDE upload example). */
 export function csvNumber(value) {
   if (value === null || value === undefined || value === '') return '';
   const n = typeof value === 'string' ? parseFloat(value) : value;
@@ -50,8 +41,6 @@ export function money(value) {
   return n.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-/** Escapes a single CSV field per RFC4180: quote if it contains a comma,
- * quote, or newline; double up any embedded quotes. */
 function csvField(value) {
   const s = value === null || value === undefined ? '' : String(value);
   if (/[",\r\n]/.test(s)) {
@@ -60,9 +49,6 @@ function csvField(value) {
   return s;
 }
 
-/** Builds a CSV string (CRLF line endings, per RFC4180 / the original
- * workbook exports) from an array of header strings and an array of row
- * arrays (values already formatted as strings). */
 export function buildCsv(headers, rows) {
   const lines = [headers.map(csvField).join(',')];
   for (const row of rows) {
@@ -71,9 +57,33 @@ export function buildCsv(headers, rows) {
   return lines.join('\r\n') + '\r\n';
 }
 
-/** Supabase's REST API caps every response at 1000 rows (PostgREST's
- * db-max-rows project setting) regardless of any LIMIT inside the RPC
- * function itself. Our detail RPCs (get_vended_detail / get_invoiced_detail)
- * are built to return up to 20,000 rows, so this pages through with
- * .range() until either the cap is hit or a short page comes back. */
-export async function fetchAllRpc(fn, params,
+export async function fetchAllRpc(fn, params, options) {
+  const pageSize = (options && options.pageSize) || 1000;
+  const cap = (options && options.cap) || 20000;
+  const rows = [];
+  let from = 0;
+  while (rows.length < cap) {
+    const to = Math.min(from + pageSize, cap) - 1;
+    const result = await supabase.rpc(fn, params).range(from, to);
+    const data = result.data;
+    const error = result.error;
+    if (error) return { data: null, error: error };
+    if (!data || data.length === 0) break;
+    rows.push.apply(rows, data);
+    if (data.length < (to - from + 1)) break;
+    from += pageSize;
+  }
+  return { data: rows, error: null };
+}
+
+export function downloadCsv(filename, csvText) {
+  const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
