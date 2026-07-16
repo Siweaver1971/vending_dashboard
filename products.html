@@ -49,8 +49,11 @@
 </main>
 
 <script type="module">
-import { supabase, renderNav, money } from './layout.js';
+import { supabase, renderNav, requireAuth, money } from './layout.js';
 
+if (!(await requireAuth())) {
+  throw new Error('redirecting to login');
+}
 renderNav('products');
 
 const resultBody = document.getElementById('result-body');

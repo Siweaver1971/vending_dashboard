@@ -22,9 +22,12 @@
 </main>
 
 <script type="module">
-import { supabase, renderNav, money, buildCsv, downloadCsv, fetchAllRpc } from './layout.js';
+import { supabase, renderNav, requireAuth, money, buildCsv, downloadCsv, fetchAllRpc } from './layout.js';
 import { renderSlicer } from './slicer.js';
 
+if (!(await requireAuth())) {
+  throw new Error('redirecting to login');
+}
 renderNav('invoiced');
 
 const slicerRow = document.getElementById('slicer-row');
@@ -139,4 +142,5 @@ document.getElementById('apply-btn').addEventListener('click', runQuery);
   await runQuery();
 })();
 </script>
-</bo
+</body>
+</html>

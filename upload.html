@@ -71,8 +71,11 @@
 </main>
 
 <script type="module">
-import { supabase, renderNav, money, fetchAllFrom } from './layout.js';
+import { supabase, renderNav, requireAuth, money, fetchAllFrom } from './layout.js';
 
+if (!(await requireAuth())) {
+  throw new Error('redirecting to login');
+}
 renderNav('upload');
 
 function esc(s) {

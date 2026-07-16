@@ -34,8 +34,11 @@
 </main>
 
 <script type="module">
-import { supabase, renderNav, MONTH_NAMES, money, csvNumber, buildCsv, downloadCsv } from './layout.js';
+import { supabase, renderNav, requireAuth, MONTH_NAMES, money, csvNumber, buildCsv, downloadCsv } from './layout.js';
 
+if (!(await requireAuth())) {
+  throw new Error('redirecting to login');
+}
 renderNav('export');
 
 const siteSelect = document.getElementById('site');

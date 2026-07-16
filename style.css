@@ -10,6 +10,15 @@ body {
 }
 .topbar .brand { font-weight: 700; padding: 16px 0; margin-right: 8px; }
 .topbar nav { display: flex; gap: 4px; flex-wrap: wrap; }
+.topbar-right { margin-left: auto; }
+.topbar-right a { color: #d1d5db; text-decoration: none; font-size: 13px; }
+.topbar-right a:hover { color: #fff; text-decoration: underline; }
+.login-wrap { max-width: 360px; margin: 80px auto; }
+.login-wrap .card { text-align: left; }
+.login-wrap label { margin-top: 12px; }
+.login-wrap input[type=email], .login-wrap input[type=password] { width: 100%; padding: 9px; border-radius: 6px; border: 1px solid #ccc; font-size: 14px; }
+.login-wrap button { width: 100%; margin-top: 16px; padding: 10px; }
+.login-error { color: #b91c1c; font-size: 13px; margin-top: 10px; }
 .topbar nav a {
   color: #d1d5db; text-decoration: none; padding: 18px 12px; font-size: 14px;
   display: inline-block; border-bottom: 3px solid transparent;
@@ -51,6 +60,8 @@ tr.total td { font-weight: 700; border-top: 2px solid #333; }
 .empty { color: #888; padding: 20px 0; }
 .loading { color: #888; padding: 20px 0; }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
+.num.good { color: #15803d; }
+.num.bad { color: #b91c1c; }
 .badge {
   display: inline-block; background: #fef3c7; color: #92400e; font-size: 11px;
   padding: 2px 8px; border-radius: 10px; margin-left: 6px; vertical-align: middle;

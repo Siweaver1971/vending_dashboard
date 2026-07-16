@@ -15,12 +15,15 @@ const NAV_ITEMS = [
   { key: 'export', href: 'index.html', label: 'JDE Export' },
   { key: 'vended', href: 'vended.html', label: 'Vended' },
   { key: 'invoiced', href: 'invoiced.html', label: 'Invoiced' },
+  { key: 'vended-yoy', href: 'vended-yoy.html', label: 'Vended YoY' },
+  { key: 'invoiced-yoy', href: 'invoiced-yoy.html', label: 'Invoiced YoY' },
   { key: 'reports', href: 'reports.html', label: 'Report Builder' },
   { key: 'products', href: 'products.html', label: 'Products' },
   { key: 'upload', href: 'upload.html', label: 'Monthly Upload' },
 ];
 
-/** Renders the shared top navigation bar into #topbar-root. Call once per page. */
+/** Renders the shared top navigation bar into #topbar-root. Call once per page.
+ * Also renders a "Log out" link on the right when a session is present. */
 export function renderNav(active) {
   const root = document.getElementById('topbar-root');
   if (!root) return;
@@ -32,8 +35,31 @@ export function renderNav(active) {
     <div class="topbar">
       <div class="brand">Vending Dashboard</div>
       <nav>${links}</nav>
+      <div class="topbar-right"><a id="logout-link" href="#" style="display:none;">Log out</a></div>
     </div>
   `;
+  const logoutLink = document.getElementById('logout-link');
+  supabase.auth.getSession().then(({ data }) => {
+    if (data && data.session) logoutLink.style.display = '';
+  });
+  logoutLink.addEventListener('click', async (e) => {
+    e.preventDefault();
+    await supabase.auth.signOut();
+    window.location.href = 'login.html';
+  });
+}
+
+/** Call at the top of every protected page (after DOM is ready, before any
+ * data fetching). Redirects to login.html if there is no active Supabase
+ * Auth session. Returns the session (or null, though by then we've already
+ * navigated away) so callers can await it before fetching data. */
+export async function requireAuth() {
+  const { data } = await supabase.auth.getSession();
+  if (!data || !data.session) {
+    window.location.href = 'login.html';
+    return null;
+  }
+  return data.session;
 }
 
 /** Formats a number the way PHP's float-to-string / fputcsv does: fixed

@@ -43,9 +43,12 @@
 </main>
 
 <script type="module">
-import { supabase, renderNav, money, buildCsv, downloadCsv, fetchAllRpc } from './layout.js';
+import { supabase, renderNav, requireAuth, money, buildCsv, downloadCsv, fetchAllRpc } from './layout.js';
 import { renderSlicer } from './slicer.js';
 
+if (!(await requireAuth())) {
+  throw new Error('redirecting to login');
+}
 renderNav('reports');
 
 const VENDED_DIMENSIONS = {
@@ -316,4 +319,5 @@ document.getElementById('run-btn').addEventListener('click', runReport);
   setSource('vended_detail');
 })();
 </script>
-</bo
+</body>
+</html>
