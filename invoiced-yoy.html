@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Invoiced Year-on-Year — Vending Dashboard</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="topbar-root"></div>
+<main>
+  <h1>Invoiced — Year on Year</h1>
+  <p class="subtitle">Compare invoiced (supplier) cost by recharge group across two years, month by month — use this to show a customer whether they're being charged less than the year before.</p>
+
+  <div class="slicer-row" id="slicer-row">
+    <div class="slicer" style="min-width:140px;">
+      <h4>Year A (earlier)</h4>
+      <select id="year-a"></select>
+    </div>
+    <div class="slicer" style="min-width:140px;">
+      <h4>Year B (later)</h4>
+      <select id="year-b"></select>
+    </div>
+  </div>
+  <div style="margin-bottom:20px;"><button type="button" id="apply-btn">Compare</button></div>
+
+  <div class="card">
+    <h2>Results</h2>
+    <div id="result-body"><p class="loading">Loading…</p></div>
+  </div>
+</main>
+
+<script type="module">
+import { supabase, renderNav, requireAuth, money } from './layout.js';
+import { renderSlicer } from './slicer.js';
+
+if (!(await requireAuth())) {
+  throw new Error('redirecting to login');
+}
+renderNav('invoiced-yoy');
+
+const slicerRow = document.getElementById('slicer-row');
+const resultBody = document.getElementById('result-body');
+const yearASelect = document.getElementById('year-a');
+const yearBSelect = document.getElementById('year-b');
+
+const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+let groupSlicer;
+
+async function buildControls() {
+  const [{ data: groups }, { data: years }] = await Promise.all([
+    supabase.from('jde_groups').select('group_name, sites(site_name)').order('group_name'),
+    supabase.rpc('get_invoiced_years'),
+  ]);
+
+  const groupNames = (groups || []).map((g) => g.group_name);
+  groupSlicer = renderSlicer(slicerRow, { label: 'Recharge Group', options: groupNames, selected: [] });
+
+  const yrs = (years || []).map((r) => r.yr).sort((a, b) => b - a);
+  yearASelect.innerHTML = yrs.map((y) => `<option value="${y}">${y}</option>`).join('');
+  yearBSelect.innerHTML = yrs.map((y) => `<option value="${y}">${y}</option>`).join('');
+  if (yrs.length >= 2) {
+    yearBSelect.value = yrs[0];
+    yearASelect.value = yrs[1];
+  }
+}
+
+function toNullIfEmpty(arr) {
+  return arr && arr.length ? arr : null;
+}
+
+async function runQuery() {
+  resultBody.innerHTML = '<p class="loading">Loading…</p>';
+
+  const yearA = parseInt(yearASelect.value, 10);
+  const yearB = parseInt(yearBSelect.value, 10);
+
+  if (!yearA || !yearB) {
+    resultBody.innerHTML = '<p class="empty">No years available yet.</p>';
+    return;
+  }
+  if (yearA === yearB) {
+    resultBody.innerHTML = '<p class="empty">Pick two different years to compare.</p>';
+    return;
+  }
+
+  const { data, error } = await supabase.rpc('get_invoiced_yoy_summary', {
+    p_groups: toNullIfEmpty(groupSlicer.getSelected()),
+    p_years: [yearA, yearB],
+  });
+
+  if (error) {
+    resultBody.innerHTML = `<p class="empty">Error: ${error.message}</p>`;
+    return;
+  }
+
+  const rows = (data || []).filter((r) => r.group_name);
+  if (rows.length === 0) {
+    resultBody.innerHTML = '<p class="empty">No invoiced lines match these filters for either year. Note: invoiced data currently only covers Sep 2025 onward, so a true year-on-year comparison needs another year of data to build up.</p>';
+    return;
+  }
+
+  const groupNames = Array.from(new Set(rows.map((r) => r.group_name))).sort();
+  const html = groupNames.map((gname) => renderGroupTable(gname, rows.filter((r) => r.group_name === gname), yearA, yearB)).join('');
+
+  const grandA = rows.filter((r) => r.txn_year === yearA).reduce((s, r) => s + Number(r.total_value || 0), 0);
+  const grandB = rows.filter((r) => r.txn_year === yearB).reduce((s, r) => s + Number(r.total_value || 0), 0);
+  const grandDiff = grandB - grandA;
+  const grandPct = grandA !== 0 ? (grandDiff / grandA) * 100 : null;
+
+  resultBody.innerHTML = `
+    <p class="basis">
+      All selected groups combined: ${yearA} total £${money(grandA)} vs ${yearB} total £${money(grandB)}
+      — ${grandDiff <= 0 ? 'a saving of' : 'an increase of'} £${money(Math.abs(grandDiff))}
+      ${grandPct !== null ? ` (${grandPct <= 0 ? '' : '+'}${grandPct.toFixed(1)}%)` : ''}.
+    </p>
+    ${html}
+  `;
+}
+
+function renderGroupTable(groupName, groupRows, yearA, yearB) {
+  const byMonth = {};
+  for (let m = 1; m <= 12; m++) byMonth[m] = { a: 0, b: 0 };
+  for (const r of groupRows) {
+    const bucket = byMonth[r.txn_month];
+    if (!bucket) continue;
+    if (r.txn_year === yearA) bucket.a += Number(r.total_value || 0);
+    if (r.txn_year === yearB) bucket.b += Number(r.total_value || 0);
+  }
+
+  let totalA = 0, totalB = 0;
+  const monthRows = MONTHS.map((mname, i) => {
+    const m = i + 1;
+    const a = byMonth[m].a;
+    const b = byMonth[m].b;
+    totalA += a;
+    totalB += b;
+    const diff = b - a;
+    const pct = a !== 0 ? (diff / a) * 100 : (b !== 0 ? null : 0);
+    const hasData = a !== 0 || b !== 0;
+    if (!hasData) return '';
+    return `
+      <tr>
+        <td>${mname}</td>
+        <td class="num">£${money(a)}</td>
+        <td class="num">£${money(b)}</td>
+        <td class="num ${diff <= 0 ? 'good' : 'bad'}">${diff <= 0 ? '−' : '+'}£${money(Math.abs(diff))}</td>
+        <td class="num ${diff <= 0 ? 'good' : 'bad'}">${pct === null ? '—' : (pct <= 0 ? '' : '+') + pct.toFixed(1) + '%'}</td>
+      </tr>`;
+  }).join('');
+
+  const totalDiff = totalB - totalA;
+  const totalPct = totalA !== 0 ? (totalDiff / totalA) * 100 : null;
+
+  return `
+    <h3 style="margin-top:24px;">${esc(groupName)}</h3>
+    <table>
+      <thead>
+        <tr><th>Month</th><th class="num">${yearA}</th><th class="num">${yearB}</th><th class="num">£ Change</th><th class="num">% Change</th></tr>
+      </thead>
+      <tbody>${monthRows}
+        <tr class="total">
+          <td>Total</td>
+          <td class="num">£${money(totalA)}</td>
+          <td class="num">£${money(totalB)}</td>
+          <td class="num ${totalDiff <= 0 ? 'good' : 'bad'}">${totalDiff <= 0 ? '−' : '+'}£${money(Math.abs(totalDiff))}</td>
+          <td class="num ${totalDiff <= 0 ? 'good' : 'bad'}">${totalPct === null ? '—' : (totalPct <= 0 ? '' : '+') + totalPct.toFixed(1) + '%'}</td>
+        </tr>
+      </tbody>
+    </table>`;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+document.getElementById('apply-btn').addEventListener('click', runQuery);
+
+(async () => {
+  await buildControls();
+  await runQuery();
+})();
+</script>
+</body>
+</html>
