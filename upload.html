@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monthly Upload — Vending Dashboard</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+</head>
+<body>
+<div id="topbar-root"></div>
+<main>
+  <h1>Monthly Upload</h1>
+  <p class="subtitle">Import the monthly Portal Data export (vended/issued items) or Supply Note export (invoiced items). Files are matched against site, item and cost centre data automatically — review the preview before anything is saved.</p>
+
+  <div class="source-toggle">
+    <a href="#" data-tab="vended" class="active">Vended (Portal Data)</a>
+    <a href="#" data-tab="invoiced">Invoiced (Supply Note)</a>
+  </div>
+
+  <!-- ===================== VENDED PANEL ===================== -->
+  <section id="panel-vended">
+    <div class="card">
+      <h2>1. Choose file</h2>
+      <p class="basis">Portal Data export (.xlsx or .csv). Only rows with <strong>ISSUE</strong> in the Type column are imported — RECVE/ADJUS/other rows are ignored. Price always comes from the Products table, never from this file.</p>
+      <input type="file" id="vended-file" accept=".xlsx,.xls,.csv">
+      <p id="vended-file-status" class="basis"></p>
+    </div>
+
+    <div class="card" id="vended-preview-card" style="display:none;">
+      <h2>2. Review</h2>
+      <div id="vended-summary"></div>
+      <div id="vended-issues"></div>
+      <div class="run-row">
+        <button type="button" id="vended-commit-btn" disabled>Import resolved rows</button>
+        <span id="vended-commit-status" class="basis"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== INVOICED PANEL ===================== -->
+  <section id="panel-invoiced" style="display:none;">
+    <div class="card">
+      <h2>1. Choose period and file</h2>
+      <p class="basis">Supply Note export (.csv). This file has no date column, so pick the month it covers.</p>
+      <div style="display:flex; gap:16px; flex-wrap:wrap; align-items:end; margin-bottom:14px;">
+        <div>
+          <label for="invoiced-period">Period</label>
+          <select id="invoiced-period"></select>
+        </div>
+      </div>
+      <input type="file" id="invoiced-file" accept=".csv,.xlsx,.xls">
+      <p id="invoiced-file-status" class="basis"></p>
+    </div>
+
+    <div class="card" id="invoiced-preview-card" style="display:none;">
+      <h2>2. Review</h2>
+      <div id="invoiced-summary"></div>
+      <div id="invoiced-issues"></div>
+      <div class="run-row">
+        <button type="button" id="invoiced-commit-btn" disabled>Import resolved rows</button>
+        <span id="invoiced-commit-status" class="basis"></span>
+      </div>
+    </div>
+  </section>
+
+  <div class="card">
+    <h2>Recent uploads</h2>
+    <div id="recent-body"><p class="loading">Loading…</p></div>
+  </div>
+</main>
+
+<script type="module">
+import { supabase, renderNav, money, fetchAllFrom } from './layout.js';
+
+renderNav('upload');
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+function toDateObj(v) {
+  if (v instanceof Date && !isNaN(v)) return v;
+  if (typeof v === 'number') {
+    // Excel serial date fallback (days since 1899-12-30)
+    const ms = Math.round((v - 25569) * 86400 * 1000);
+    const d = new Date(ms);
+    if (!isNaN(d)) return d;
+  }
+  if (typeof v === 'string' && v.trim()) {
+    const d = new Date(v);
+    if (!isNaN(d)) return d;
+  }
+  return null;
+}
+function isoDate(d) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
+function isoTime(d) { return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`; }
+
+function readWorkbookRows(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(e.target.result, { type: 'array', cellDates: true });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet, { defval: null, raw: true });
+        resolve(rows);
+      } catch (err) { reject(err); }
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+/* ---------------- Tab switching ---------------- */
+document.querySelectorAll('.source-toggle a').forEach((a) => {
+  a.addEventListener('click', (e) => {
+    e.preventDefault();
+    document.querySelectorAll('.source-toggle a').forEach((x) => x.classList.remove('active'));
+    a.classList.add('active');
+    const tab = a.dataset.tab;
+    document.getElementById('panel-vended').style.display = tab === 'vended' ? '' : 'none';
+    document.getElementById('panel-invoiced').style.display = tab === 'invoiced' ? '' : 'none';
+  });
+});
+
+/* ================================================================
+   VENDED (Portal Data) UPLOAD
+   ================================================================ */
+let vendedResolvedRows = [];
+let vendedNewEmployees = new Map(); // employee_id -> employee_name
+let vendedNewCostCentres = new Map(); // `${jde_group_key}|${name}` -> {jde_group_key, name}
+let vendedSourceFile = '';
+
+let refSites = [], refGroups = [], refCribs = [], refItems = [], refEmployees = [], refCostCentres = [];
+
+async function loadVendedReferenceData() {
+  const [sitesR, groupsR, itemsR, cribsR, employeesR, ccR] = await Promise.all([
+    supabase.from('sites').select('site_key, site_name'),
+    supabase.from('jde_groups').select('jde_group_key, site_key, group_name, raw_site_id, raw_crib_area'),
+    supabase.rpc('get_items_current'),
+    fetchAllFrom(() => supabase.from('crib_locations').select('crib, crib_area, crib_bin, site_key')),
+    fetchAllFrom(() => supabase.from('employees').select('employee_key, employee_id, employee_name')),
+    fetchAllFrom(() => supabase.from('cost_centres').select('cost_centre_key, jde_group_key, cost_centre_name').eq('is_current', 1)),
+  ]);
+  refSites = sitesR.data || [];
+  refGroups = groupsR.data || [];
+  refItems = itemsR.data || [];
+  refCribs = cribsR.data || [];
+  refEmployees = employeesR.data || [];
+  refCostCentres = ccR.data || [];
+}
+
+function findSiteKeyByCrib(crib) {
+  const hit = refCribs.find((c) => String(c.crib) === String(crib));
+  return hit ? hit.site_key : null;
+}
+function findGroupForSite(siteKey, cribArea) {
+  const groups = refGroups.filter((g) => g.site_key === siteKey);
+  if (groups.length === 1) return groups[0];
+  if (groups.length === 0) return null;
+  const area = (cribArea || '').trim().toLowerCase();
+  return groups.find((g) => (g.raw_crib_area || '').trim().toLowerCase() === area) || null;
+}
+function findCribLocationKeyByBin(bin) {
+  // not exposed with a key in our select (we didn't select crib_location_key) -- left null;
+  // resolution below only needs site/group, so this is intentionally omitted.
+  return null;
+}
+function findItem(itemCode) {
+  return refItems.find((i) => i.item_code === itemCode) || null;
+}
+function findEmployee(employeeId) {
+  if (!employeeId) return null;
+  return refEmployees.find((e) => e.employee_id === employeeId) || null;
+}
+function findCostCentre(jdeGroupKey, name) {
+  if (!name) return null;
+  const n = name.trim().toLowerCase();
+  return refCostCentres.find((c) => c.jde_group_key === jdeGroupKey && (c.cost_centre_name || '').trim().toLowerCase() === n) || null;
+}
+
+async function handleVendedFile(file) {
+  const statusEl = document.getElementById('vended-file-status');
+  statusEl.textContent = 'Reading file…';
+  vendedSourceFile = file.name;
+
+  let rows;
+  try {
+    rows = await readWorkbookRows(file);
+  } catch (err) {
+    statusEl.textContent = 'Could not read file: ' + err.message;
+    return;
+  }
+
+  statusEl.textContent = 'Matching against site, item and cost centre data…';
+  await loadVendedReferenceData();
+
+  const issueRows = rows.filter((r) => (r['Type'] || '').toString().trim().toUpperCase() === 'ISSUE');
+
+  const resolved = [];
+  const unresolved = [];
+  vendedNewEmployees = new Map();
+  vendedNewCostCentres = new Map();
+
+  for (const r of issueRows) {
+    const crib = r['Crib'] != null ? String(r['Crib']) : '';
+    const cribArea = r['CribArea'] || '';
+    const siteId = r['Site ID'] || '';
+    const itemCode = (r['Item'] || '').toString().trim();
+    const dateObj = toDateObj(r['Date']);
+    const timeObj = toDateObj(r['Time']);
+    const qty = Number(r['Quantity']) || 0;
+
+    let siteKey = findSiteKeyByCrib(crib);
+    let fallbackUsed = false;
+    if (!siteKey && siteId) {
+      const g = refGroups.find((g) => g.raw_site_id === siteId);
+      if (g) { siteKey = g.site_key; fallbackUsed = true; }
+    }
+
+    const reasons = [];
+    if (!siteKey) reasons.push('Unknown crib ' + crib + ' (and no matching Site ID ' + siteId + ')');
+    const group = siteKey ? findGroupForSite(siteKey, cribArea) : null;
+    if (siteKey && !group) reasons.push('Could not determine recharge group for crib area "' + cribArea + '"');
+    const item = findItem(itemCode);
+    if (!item) reasons.push('Item code "' + itemCode + '" not found in Products');
+    if (!dateObj) reasons.push('Unreadable date');
+
+    if (reasons.length) {
+      unresolved.push({ row: r, reasons });
+      continue;
+    }
+
+    const employee = findEmployee(r['Employee ID']);
+    if (!employee && r['Employee ID']) {
+      vendedNewEmployees.set(String(r['Employee ID']), r['Name'] || '');
+    }
+    const costCentre = findCostCentre(group.jde_group_key, r['Cost centre']);
+    if (!costCentre && r['Cost centre']) {
+      vendedNewCostCentres.set(group.jde_group_key + '|' + r['Cost centre'], { jde_group_key: group.jde_group_key, name: r['Cost centre'] });
+    }
+
+    const unitCost = Number(item.price);
+    resolved.push({
+      txn_date: isoDate(dateObj),
+      txn_time: timeObj ? isoTime(timeObj) : null,
+      site_key: siteKey,
+      jde_group_key: group.jde_group_key,
+      crib_location_key: null,
+      employee_key: employee ? employee.employee_key : null,
+      _employee_id: r['Employee ID'] || null,
+      cost_centre_raw: r['Cost centre'] || null,
+      cost_centre_key: costCentre ? costCentre.cost_centre_key : null,
+      _cc_lookup: group.jde_group_key + '|' + (r['Cost centre'] || ''),
+      item_code: itemCode,
+      description: item.description || r['Description'] || null,
+      quantity: qty,
+      txn_type: 'ISSUE',
+      unit_cost: unitCost,
+      total_value: Math.round(unitCost * qty * 100) / 100,
+      raw_site_id: siteId || null,
+      _fallback: fallbackUsed,
+    });
+  }
+
+  vendedResolvedRows = resolved;
+  renderVendedPreview(rows.length, issueRows.length, resolved, unresolved);
+  statusEl.textContent = `Parsed ${rows.length.toLocaleString()} rows from "${file.name}".`;
+}
+
+function renderVendedPreview(totalRows, issueCount, resolved, unresolved) {
+  document.getElementById('vended-preview-card').style.display = '';
+  const total = resolved.reduce((s, r) => s + r.total_value, 0);
+  const fallbackCount = resolved.filter((r) => r._fallback).length;
+
+  document.getElementById('vended-summary').innerHTML = `
+    <p class="basis">
+      ${totalRows.toLocaleString()} rows in file, ${issueCount.toLocaleString()} with Type = ISSUE.
+      <strong>${resolved.length.toLocaleString()}</strong> ready to import (total value £${money(total)}),
+      <strong>${unresolved.length.toLocaleString()}</strong> need attention.
+      ${fallbackCount ? `${fallbackCount} matched via Site ID rather than crib (crib not found in Products site data) — worth a spot check.` : ''}
+      ${vendedNewEmployees.size ? `${vendedNewEmployees.size} new employee ID(s) will be created automatically.` : ''}
+      ${vendedNewCostCentres.size ? ` ${vendedNewCostCentres.size} new cost centre(s) will be created automatically.` : ''}
+    </p>
+  `;
+
+  const issuesEl = document.getElementById('vended-issues');
+  if (unresolved.length === 0) {
+    issuesEl.innerHTML = '';
+  } else {
+    const rowsHtml = unresolved.slice(0, 200).map((u) => `
+      <tr>
+        <td>${esc(u.row['Date'])}</td>
+        <td>${esc(u.row['Crib'])} / ${esc(u.row['CribArea'])}</td>
+        <td>${esc(u.row['Item'])}</td>
+        <td>${esc(u.row['Description'])}</td>
+        <td>${esc(u.reasons.join('; '))}</td>
+      </tr>`).join('');
+    issuesEl.innerHTML = `
+      <h3>Needs attention (${unresolved.length.toLocaleString()}, excluded from import)</h3>
+      <table>
+        <thead><tr><th>Date</th><th>Crib / Area</th><th>Item</th><th>Description</th><th>Reason</th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+      ${unresolved.length > 200 ? `<p class="basis">Showing first 200 of ${unresolved.length}.</p>` : ''}
+    `;
+  }
+
+  document.getElementById('vended-commit-btn').disabled = resolved.length === 0;
+  document.getElementById('vended-commit-status').textContent = '';
+}
+
+document.getElementById('vended-file').addEventListener('change', (e) => {
+  if (e.target.files && e.target.files[0]) handleVendedFile(e.target.files[0]);
+});
+
+document.getElementById('vended-commit-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('vended-commit-btn');
+  const statusEl = document.getElementById('vended-commit-status');
+  btn.disabled = true;
+  statusEl.textContent = 'Creating new employees / cost centres…';
+
+  try {
+    const employeeKeyMap = new Map();
+    for (const [empId, name] of vendedNewEmployees.entries()) {
+      const { data, error } = await supabase.rpc('upsert_employee', { p_employee_id: empId, p_employee_name: name });
+      if (error) throw error;
+      employeeKeyMap.set(empId, data);
+    }
+    const ccKeyMap = new Map();
+    for (const [key, v] of vendedNewCostCentres.entries()) {
+      const { data, error } = await supabase.rpc('upsert_cost_centre', { p_jde_group_key: v.jde_group_key, p_cost_centre_name: v.name });
+      if (error) throw error;
+      ccKeyMap.set(key, data);
+    }
+
+    const finalRows = vendedResolvedRows.map((r) => {
+      const row = { ...r };
+      if (row.employee_key == null && row._employee_id && employeeKeyMap.has(row._employee_id)) {
+        row.employee_key = employeeKeyMap.get(row._employee_id);
+      }
+      if (row.cost_centre_key == null && ccKeyMap.has(row._cc_lookup)) {
+        row.cost_centre_key = ccKeyMap.get(row._cc_lookup);
+      }
+      delete row._employee_id;
+      delete row._cc_lookup;
+      delete row._fallback;
+      return row;
+    });
+
+    statusEl.textContent = `Importing ${finalRows.length.toLocaleString()} rows…`;
+    const { data, error } = await supabase.rpc('commit_vended_upload', {
+      p_rows: finalRows,
+      p_source_file: vendedSourceFile,
+    });
+    if (error) throw error;
+    const result = data && data[0];
+    statusEl.textContent = `Done — imported ${result ? result.row_count : finalRows.length} rows (batch #${result ? result.load_batch_key : '?'}).`;
+    vendedResolvedRows = [];
+    loadRecentUploads();
+  } catch (err) {
+    statusEl.textContent = 'Error: ' + err.message;
+    btn.disabled = false;
+  }
+});
+
+/* ================================================================
+   INVOICED (Supply Note) UPLOAD
+   ================================================================ */
+let invoicedResolvedRows = [];
+let invoicedUnresolvedPairs = new Map(); // "account|customer" -> {account, customer, rows[]}
+let invoicedSourceFile = '';
+let refAccountMap = [];
+
+function populatePeriodSelect() {
+  const sel = document.getElementById('invoiced-period');
+  const names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const now = new Date();
+  const opts = [];
+  for (let i = 0; i < 15; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    opts.push(`${names[d.getMonth()]} ${d.getFullYear()}`);
+  }
+  sel.innerHTML = '<option value="">Select a period…</option>' + opts.map((o) => `<option value="${o}">${o}</option>`).join('');
+}
+populatePeriodSelect();
+
+async function loadInvoicedReferenceData() {
+  const [groupsR, sitesR, mapR] = await Promise.all([
+    supabase.from('jde_groups').select('jde_group_key, site_key, group_name'),
+    supabase.from('sites').select('site_key, site_name'),
+    fetchAllFrom(() => supabase.from('invoiced_account_map').select('account_number, customer_name_raw, jde_group_key')),
+  ]);
+  refGroups = groupsR.data || [];
+  refSites = sitesR.data || [];
+  refAccountMap = mapR.data || [];
+}
+
+function groupLabel(jdeGroupKey) {
+  const g = refGroups.find((x) => x.jde_group_key === jdeGroupKey);
+  if (!g) return '?';
+  const s = refSites.find((x) => x.site_key === g.site_key);
+  return `${s ? s.site_name : '?'} — ${g.group_name}`;
+}
+
+async function handleInvoicedFile(file) {
+  const statusEl = document.getElementById('invoiced-file-status');
+  const period = document.getElementById('invoiced-period').value;
+  if (!period) {
+    statusEl.textContent = 'Pick a period first.';
+    document.getElementById('invoiced-file').value = '';
+    return;
+  }
+  statusEl.textContent = 'Reading file…';
+  invoicedSourceFile = file.name;
+
+  let rows;
+  try {
+    rows = await readWorkbookRows(file);
+  } catch (err) {
+    statusEl.textContent = 'Could not read file: ' + err.message;
+    return;
+  }
+
+  statusEl.textContent = 'Matching accounts…';
+  await loadInvoicedReferenceData();
+
+  const resolved = [];
+  invoicedUnresolvedPairs = new Map();
+
+  for (const r of rows) {
+    const account = (r['Account Number'] || '').toString().trim();
+    const customer = (r['Customer Name'] || '').toString().trim();
+    if (!account && !customer) continue;
+
+    const match = refAccountMap.find((m) => m.account_number === account && m.customer_name_raw === customer);
+    if (!match) {
+      const key = account + '|' + customer;
+      if (!invoicedUnresolvedPairs.has(key)) {
+        invoicedUnresolvedPairs.set(key, { account, customer, rows: [], jde_group_key: null });
+      }
+      invoicedUnresolvedPairs.get(key).rows.push(r);
+      continue;
+    }
+
+    resolved.push({
+      account_number: account,
+      customer_name_raw: customer,
+      jde_group_key: match.jde_group_key,
+      product_code: (r['Product Code'] || '').toString().trim(),
+      stock_quantity: Number(r['Stock Quantity']) || 0,
+      full_description: r['Full Description'] || null,
+      product_group: r['Stocking Category'] || null,
+      standard_cost: Number(r['Standard Cost']) || 0,
+      total_stock_value: Number(r['Total Stock Value']) || 0,
+      _key: account + '|' + customer,
+    });
+  }
+
+  invoicedResolvedRows = resolved;
+  renderInvoicedPreview(rows.length, resolved);
+  statusEl.textContent = `Parsed ${rows.length.toLocaleString()} rows from "${file.name}" for period ${period}.`;
+}
+
+function renderInvoicedPreview(totalRows, resolved) {
+  document.getElementById('invoiced-preview-card').style.display = '';
+  const total = resolved.reduce((s, r) => s + r.total_stock_value, 0);
+  const unresolvedRowCount = Array.from(invoicedUnresolvedPairs.values()).reduce((s, p) => s + p.rows.length, 0);
+
+  document.getElementById('invoiced-summary').innerHTML = `
+    <p class="basis">
+      ${totalRows.toLocaleString()} rows in file.
+      <strong>${resolved.length.toLocaleString()}</strong> ready to import (total value £${money(total)}),
+      <strong>${unresolvedRowCount.toLocaleString()}</strong> across ${invoicedUnresolvedPairs.size} new account/customer combination(s) need a recharge group assigned below before they can be imported.
+    </p>
+  `;
+
+  const issuesEl = document.getElementById('invoiced-issues');
+  if (invoicedUnresolvedPairs.size === 0) {
+    issuesEl.innerHTML = '';
+  } else {
+    const groupOptions = refGroups
+      .slice()
+      .sort((a, b) => groupLabel(a.jde_group_key).localeCompare(groupLabel(b.jde_group_key)))
+      .map((g) => `<option value="${g.jde_group_key}">${esc(groupLabel(g.jde_group_key))}</option>`).join('');
+
+    const rowsHtml = Array.from(invoicedUnresolvedPairs.entries()).map(([key, p]) => `
+      <tr>
+        <td>${esc(p.account)}</td>
+        <td>${esc(p.customer)}</td>
+        <td>${p.rows.length}</td>
+        <td>
+          <select data-assign-key="${esc(key)}">
+            <option value="">Assign to…</option>
+            ${groupOptions}
+          </select>
+        </td>
+      </tr>`).join('');
+    issuesEl.innerHTML = `
+      <h3>New accounts — assign a recharge group</h3>
+      <table>
+        <thead><tr><th>Account #</th><th>Customer</th><th>Lines</th><th>Assign</th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    `;
+    issuesEl.querySelectorAll('[data-assign-key]').forEach((sel) => {
+      sel.addEventListener('change', () => {
+        const key = sel.dataset.assignKey;
+        const p = invoicedUnresolvedPairs.get(key);
+        p.jde_group_key = sel.value ? Number(sel.value) : null;
+        updateInvoicedCommitState();
+      });
+    });
+  }
+
+  updateInvoicedCommitState();
+}
+
+function updateInvoicedCommitState() {
+  const allAssigned = Array.from(invoicedUnresolvedPairs.values()).every((p) => p.jde_group_key);
+  const hasAnyRows = invoicedResolvedRows.length > 0 || invoicedUnresolvedPairs.size > 0;
+  document.getElementById('invoiced-commit-btn').disabled = !hasAnyRows || !allAssigned;
+}
+
+document.getElementById('invoiced-file').addEventListener('change', (e) => {
+  if (e.target.files && e.target.files[0]) handleInvoicedFile(e.target.files[0]);
+});
+
+document.getElementById('invoiced-commit-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('invoiced-commit-btn');
+  const statusEl = document.getElementById('invoiced-commit-status');
+  const period = document.getElementById('invoiced-period').value;
+  btn.disabled = true;
+  statusEl.textContent = 'Saving new account assignments…';
+
+  try {
+    for (const p of invoicedUnresolvedPairs.values()) {
+      if (!p.jde_group_key) continue;
+      const { error } = await supabase.rpc('assign_invoiced_account', {
+        p_account_number: p.account, p_customer_name: p.customer, p_jde_group_key: p.jde_group_key,
+      });
+      if (error) throw error;
+      for (const r of p.rows) {
+        invoicedResolvedRows.push({
+          account_number: p.account,
+          customer_name_raw: p.customer,
+          jde_group_key: p.jde_group_key,
+          product_code: (r['Product Code'] || '').toString().trim(),
+          stock_quantity: Number(r['Stock Quantity']) || 0,
+          full_description: r['Full Description'] || null,
+          product_group: r['Stocking Category'] || null,
+          standard_cost: Number(r['Standard Cost']) || 0,
+          total_stock_value: Number(r['Total Stock Value']) || 0,
+        });
+      }
+    }
+
+    const finalRows = invoicedResolvedRows.map((r) => {
+      const row = { ...r };
+      delete row._key;
+      return row;
+    });
+
+    statusEl.textContent = `Importing ${finalRows.length.toLocaleString()} rows…`;
+    const { data, error } = await supabase.rpc('commit_invoiced_upload', {
+      p_rows: finalRows,
+      p_source_file: invoicedSourceFile,
+      p_period_label: period,
+    });
+    if (error) throw error;
+    const result = data && data[0];
+    statusEl.textContent = `Done — imported ${result ? result.row_count : finalRows.length} rows (batch #${result ? result.load_batch_key : '?'}).`;
+    invoicedResolvedRows = [];
+    invoicedUnresolvedPairs = new Map();
+    loadRecentUploads();
+  } catch (err) {
+    statusEl.textContent = 'Error: ' + err.message;
+    btn.disabled = false;
+  }
+});
+
+/* ---------------- Recent uploads ---------------- */
+async function loadRecentUploads() {
+  const el = document.getElementById('recent-body');
+  const { data, error } = await supabase.from('load_batches').select('*').order('load_batch_key', { ascending: false }).limit(20);
+  if (error) { el.innerHTML = `<p class="empty">Error: ${error.message}</p>`; return; }
+  if (!data || data.length === 0) { el.innerHTML = '<p class="empty">No uploads yet.</p>'; return; }
+  const rowsHtml = data.map((b) => `
+    <tr>
+      <td>${esc(b.loaded_at)}</td>
+      <td>${esc(b.feed_type)}</td>
+      <td>${esc(b.source_file)}</td>
+      <td>${esc(b.period_label || '')}</td>
+      <td class="num">${(b.row_count || 0).toLocaleString()}</td>
+    </tr>`).join('');
+  el.innerHTML = `
+    <table>
+      <thead><tr><th>Loaded at</th><th>Type</th><th>File</th><th>Period</th><th class="num">Rows</th></tr></thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+  `;
+}
+
+loadRecentUploads();
+</script>
+</body>
+</html>
