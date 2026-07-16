@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Invoiced — Vending Dashboard</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="topbar-root"></div>
+<main>
+  <h1>Invoiced</h1>
+  <p class="subtitle">Raw supplier-invoiced items per site — matches the original per-site "Invoiced" sheet.</p>
+
+  <div class="slicer-row" id="slicer-row"></div>
+  <div style="margin-bottom:20px;"><button type="button" id="apply-btn">Apply</button></div>
+
+  <div class="card">
+    <h2>Results</h2>
+    <div id="result-body"><p class="loading">Loading…</p></div>
+  </div>
+</main>
+
+<script type="module">
+import { supabase, renderNav, money, buildCsv, downloadCsv } from './layout.js';
+import { renderSlicer } from './slicer.js';
+
+renderNav('invoiced');
+
+const slicerRow = document.getElementById('slicer-row');
+const resultBody = document.getElementById('result-body');
+let currentRows = [];
+
+let siteSlicer, groupSlicer, periodSlicer, pgSlicer;
+
+async function buildSlicers() {
+  const [{ data: groups }, { data: periods }, { data: pgNames }] = await Promise.all([
+    supabase.from('jde_groups').select('group_name, sites(site_name)').order('group_name'),
+    supabase.rpc('get_invoiced_periods'),
+    supabase.rpc('get_product_groups'),
+  ]);
+
+  const siteNames = Array.from(new Set((groups || []).map((g) => g.sites.site_name))).sort();
+  const groupNames = (groups || []).map((g) => g.group_name);
+  const periodOpts = (periods || []).map((r) => r.period_label);
+  const pgOpts = (pgNames || []).map((r) => r.product_group);
+
+  slicerRow.innerHTML = '';
+  siteSlicer = renderSlicer(slicerRow, { label: 'Site', options: siteNames, selected: [] });
+  groupSlicer = renderSlicer(slicerRow, { label: 'Recharge Group', options: groupNames, selected: [] });
+  periodSlicer = renderSlicer(slicerRow, { label: 'Period', options: periodOpts, selected: [] });
+  pgSlicer = renderSlicer(slicerRow, { label: 'Product Group', options: pgOpts, selected: [] });
+}
+
+function toNullIfEmpty(arr) {
+  return arr && arr.length ? arr : null;
+}
+
+async function runQuery() {
+  resultBody.innerHTML = '<p class="loading">Loading…</p>';
+
+  const { data, error } = await supabase.rpc('get_invoiced_detail', {
+    p_sites: toNullIfEmpty(siteSlicer.getSelected()),
+    p_groups: toNullIfEmpty(groupSlicer.getSelected()),
+    p_periods: toNullIfEmpty(periodSlicer.getSelected()),
+    p_product_groups: toNullIfEmpty(pgSlicer.getSelected()),
+  });
+
+  if (error) {
+    resultBody.innerHTML = `<p class="empty">Error: ${error.message}</p>`;
+    currentRows = [];
+    return;
+  }
+
+  currentRows = data || [];
+  const n = currentRows.length;
+  const total = currentRows.reduce((sum, r) => sum + Number(r.total_stock_value || 0), 0);
+  const shown = currentRows.slice(0, 500);
+
+  if (n === 0) {
+    resultBody.innerHTML = '<p class="empty">No invoiced lines match these filters.</p>';
+    return;
+  }
+
+  const rowsHtml = shown.map((r) => `
+    <tr>
+      <td>${esc(r.period_label || '')}</td>
+      <td>${esc(r.site_name || '')}</td>
+      <td>${esc(r.group_name || '')}</td>
+      <td>${esc(r.account_number || '')}</td>
+      <td>${esc(r.customer_name_raw || '')}</td>
+      <td>${esc(r.product_code)}</td>
+      <td>${esc(r.full_description || '')}</td>
+      <td>${esc(r.product_group || '')}</td>
+      <td class="num">${money(r.stock_quantity)}</td>
+      <td class="num">£${money(r.standard_cost)}</td>
+      <td class="num">£${money(r.total_stock_value)}</td>
+    </tr>`).join('');
+
+  resultBody.innerHTML = `
+    <p class="basis">
+      ${n.toLocaleString()} line${n === 1 ? '' : 's'} matching these filters, total stock value £${money(total)}
+      ${n > 500 ? ' — showing 500 below, download CSV for the full set (up to 20,000 rows).' : '.'}
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th>Period</th><th>Site</th><th>Group</th><th>Account #</th><th>Customer</th>
+          <th>Product Code</th><th>Description</th><th>Product Group</th>
+          <th class="num">Stock Qty</th><th class="num">Standard Cost</th><th class="num">Total Value</th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+    <button type="button" class="download-link" id="download-btn">Download CSV (up to 20,000 rows)</button>
+  `;
+  document.getElementById('download-btn').addEventListener('click', downloadInvoicedCsv);
+}
+
+function downloadInvoicedCsv() {
+  const headers = ['Site','Group','Account Number','Customer','Product Code','Description','Product Group','Stock Qty','Standard Cost','Total Stock Value','Period'];
+  const rows = currentRows.map((r) => [
+    r.site_name, r.group_name, r.account_number, r.customer_name_raw, r.product_code,
+    r.full_description, r.product_group, r.stock_quantity, r.standard_cost, r.total_stock_value, r.period_label,
+  ]);
+  downloadCsv('invoiced_export.csv', buildCsv(headers, rows));
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+document.getElementById('apply-btn').addEventListener('click', runQuery);
+
+(async () => {
+  await buildSlicers();
+  await runQuery();
+})();
+</script>
+</body>
+</html>

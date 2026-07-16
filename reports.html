@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Report Builder — Vending Dashboard</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="topbar-root"></div>
+<main>
+  <h1>Report Builder</h1>
+  <p class="subtitle">Choose what to group by, what to measure, and tick your slicers — then run it.</p>
+
+  <div class="source-toggle">
+    <a href="#" id="src-vended" data-source="vended_detail">Vended Transaction Detail</a>
+    <a href="#" id="src-recharge" data-source="recharge_summary">Recharge / Export Summary</a>
+  </div>
+
+  <div class="card">
+    <div class="builder">
+      <div class="builder-col">
+        <h3>Group by (dimensions)</h3>
+        <div id="dims-list"></div>
+      </div>
+      <div class="builder-col">
+        <h3>Measure (metrics)</h3>
+        <div id="metrics-list"></div>
+      </div>
+      <div class="builder-col wide">
+        <h3>Slicers</h3>
+        <div class="slicer-row" id="slicer-row" style="box-shadow:none;padding:0;margin-bottom:0;"></div>
+        <div class="text-filters-grid" id="text-filters"></div>
+      </div>
+    </div>
+    <div class="run-row"><button type="button" id="run-btn">Run Report</button></div>
+  </div>
+
+  <div class="card" id="results-card" style="display:none;">
+    <h2>Results</h2>
+    <div id="result-body"></div>
+  </div>
+</main>
+
+<script type="module">
+import { supabase, renderNav, money, buildCsv, downloadCsv } from './layout.js';
+import { renderSlicer } from './slicer.js';
+
+renderNav('reports');
+
+const VENDED_DIMENSIONS = {
+  site:        { label: 'Site',          get: (r) => r.site_name },
+  group:       { label: 'Recharge Group',get: (r) => r.group_name },
+  cost_centre: { label: 'Cost Centre',   get: (r) => r.cost_centre_name },
+  item:        { label: 'Item',          get: (r) => r.item_code },
+  employee:    { label: 'Employee',      get: (r) => r.employee_name || 'Unknown' },
+  year:        { label: 'Year',          get: (r) => String(r.txn_date).slice(0, 4) },
+  period:      { label: 'Month',         get: (r) => String(r.txn_date).slice(0, 7) },
+  date:        { label: 'Date',          get: (r) => r.txn_date },
+};
+const VENDED_METRICS = {
+  total_value: { label: 'Total Value (£)', money: true, agg: (rows) => rows.reduce((s, r) => s + Number(r.total_value || 0), 0) },
+  quantity:    { label: 'Total Quantity',  money: false, agg: (rows) => rows.reduce((s, r) => s + Number(r.quantity || 0), 0) },
+  txn_count:   { label: 'Transaction Count', money: false, agg: (rows) => rows.length },
+};
+
+const RECHARGE_DIMENSIONS = {
+  site: 'Site', group: 'Recharge Group', cost_centre: 'Cost Centre',
+  year: 'Year', period: 'Month', basis: 'Basis',
+};
+const RECHARGE_METRICS = {
+  vended_raw: 'Vended (raw) £', recharge_amount: 'Recharge Amount £',
+  pro_rata_diff: 'Pro Rata Difference £ (recharge − raw)',
+};
+
+let source = 'vended_detail';
+let siteSlicer, groupSlicer, periodSlicer;
+let allGroups = []; // [{group_name, site_name}]
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+function toNullIfEmpty(arr) { return arr && arr.length ? arr : null; }
+
+function renderCheckList(container, options) {
+  container.innerHTML = '';
+  const boxes = {};
+  Object.entries(options).forEach(([key, opt]) => {
+    const label = typeof opt === 'string' ? opt : opt.label;
+    const row = document.createElement('div');
+    row.className = 'check-row';
+    const id = `chk_${container.id}_${key}`;
+    row.innerHTML = `<input type="checkbox" id="${id}" value="${key}"><label for="${id}">${esc(label)}</label>`;
+    container.appendChild(row);
+    boxes[key] = row.querySelector('input');
+  });
+  return boxes;
+}
+
+let dimBoxes = {}, metricBoxes = {};
+
+function setSource(newSource) {
+  source = newSource;
+  document.getElementById('src-vended').classList.toggle('active', source === 'vended_detail');
+  document.getElementById('src-recharge').classList.toggle('active', source === 'recharge_summary');
+
+  const dims = source === 'vended_detail' ? VENDED_DIMENSIONS : RECHARGE_DIMENSIONS;
+  const metrics = source === 'vended_detail' ? VENDED_METRICS : RECHARGE_METRICS;
+  dimBoxes = renderCheckList(document.getElementById('dims-list'), dims);
+  metricBoxes = renderCheckList(document.getElementById('metrics-list'), metrics);
+
+  const textFilters = document.getElementById('text-filters');
+  if (source === 'vended_detail') {
+    textFilters.innerHTML = `
+      <div><label>Cost Centre contains</label><input type="text" id="f-cc" placeholder="e.g. PPE"></div>
+      <div><label>Item code/description contains</label><input type="text" id="f-item" placeholder="e.g. glove"></div>
+      <div><label>Employee name contains</label><input type="text" id="f-emp" placeholder="e.g. Smith"></div>
+    `;
+  } else {
+    textFilters.innerHTML = `
+      <div><label>Basis</label>
+        <select id="f-basis">
+          <option value="all">All</option>
+          <option value="historical">Historical only</option>
+          <option value="computed">Computed only</option>
+        </select>
+      </div>
+    `;
+  }
+  document.getElementById('results-card').style.display = 'none';
+}
+
+async function buildSlicers() {
+  const { data: groups } = await supabase.from('jde_groups').select('group_name, sites(site_name)').order('group_name');
+  allGroups = (groups || []).map((g) => ({ group_name: g.group_name, site_name: g.sites.site_name }));
+  const siteNames = Array.from(new Set(allGroups.map((g) => g.site_name))).sort();
+  const groupNames = allGroups.map((g) => g.group_name);
+
+  const { data: periods } = await supabase.rpc('get_vended_periods');
+  const periodOpts = (periods || []).map((p) => [p.period_key, p.period_label]);
+
+  const slicerRow = document.getElementById('slicer-row');
+  slicerRow.innerHTML = '';
+  siteSlicer = renderSlicer(slicerRow, { label: 'Site', options: siteNames, selected: [] });
+  groupSlicer = renderSlicer(slicerRow, { label: 'Recharge Group', options: groupNames, selected: [] });
+  periodSlicer = renderSlicer(slicerRow, { label: 'Period', options: periodOpts, selected: [] });
+}
+
+async function runVendedReport(dims, metrics) {
+  const { data, error } = await supabase.rpc('get_vended_detail', {
+    p_sites: toNullIfEmpty(siteSlicer.getSelected()),
+    p_groups: toNullIfEmpty(groupSlicer.getSelected()),
+    p_periods: toNullIfEmpty(periodSlicer.getSelected()),
+    p_cost_centres: null,
+    p_product_groups: null,
+  });
+  if (error) throw error;
+  let rows = data || [];
+
+  const ccSearch = (document.getElementById('f-cc')?.value || '').toLowerCase();
+  const itemSearch = (document.getElementById('f-item')?.value || '').toLowerCase();
+  const empSearch = (document.getElementById('f-emp')?.value || '').toLowerCase();
+  if (ccSearch) rows = rows.filter((r) => (r.cost_centre_name || '').toLowerCase().includes(ccSearch));
+  if (itemSearch) rows = rows.filter((r) => (r.item_code || '').toLowerCase().includes(itemSearch) || (r.description || '').toLowerCase().includes(itemSearch));
+  if (empSearch) rows = rows.filter((r) => (r.employee_name || '').toLowerCase().includes(empSearch));
+
+  const groups = new Map();
+  for (const row of rows) {
+    const key = dims.map((d) => VENDED_DIMENSIONS[d].get(row)).join('|');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+
+  const columns = dims.map((d) => ({ key: d, label: VENDED_DIMENSIONS[d].label, numeric: false }))
+    .concat(metrics.map((m) => ({ key: m, label: VENDED_METRICS[m].label, numeric: true, money: VENDED_METRICS[m].money })));
+
+  const outRows = [];
+  for (const [, groupRows] of groups) {
+    const outRow = {};
+    dims.forEach((d) => { outRow[d] = VENDED_DIMENSIONS[d].get(groupRows[0]); });
+    metrics.forEach((m) => { outRow[m] = Math.round(VENDED_METRICS[m].agg(groupRows) * 100) / 100; });
+    outRows.push(outRow);
+  }
+  outRows.sort((a, b) => b[metrics[0]] - a[metrics[0]]);
+  return { columns, rows: outRows.slice(0, 500) };
+}
+
+async function runRechargeReport(dims, metrics) {
+  const selSites = siteSlicer.getSelected();
+  const selGroups = groupSlicer.getSelected();
+  const selPeriods = periodSlicer.getSelected(); // 'YYYY-MM'
+  const basisFilter = document.getElementById('f-basis')?.value || 'all';
+
+  const targetGroups = allGroups.filter((g) =>
+    (selSites.length === 0 || selSites.includes(g.site_name)) &&
+    (selGroups.length === 0 || selGroups.includes(g.group_name))
+  );
+
+  const monthNames = ['', 'January','February','March','April','May','June','July','August','September','October','November','December'];
+  const flatRows = [];
+
+  for (const g of targetGroups) {
+    const { data: groupPeriods } = await supabase.rpc('get_group_periods', { p_group_name: g.group_name });
+    for (const p of (groupPeriods || [])) {
+      const periodKey = `${p.yr}-${p.mo}`;
+      if (selPeriods.length > 0 && !selPeriods.includes(periodKey)) continue;
+
+      const { data: exportLines, error } = await supabase.rpc('get_jde_export', {
+        p_group_name: g.group_name, p_year: p.yr, p_month: p.mo,
+      });
+      if (error || !exportLines || exportLines.length === 0) continue;
+
+      const basisTag = exportLines[0].basis.includes('historical') ? 'historical' : 'computed';
+      if (basisFilter !== 'all' && basisFilter !== basisTag) continue;
+
+      for (const line of exportLines) {
+        flatRows.push({
+          site: g.site_name,
+          group: g.group_name,
+          cost_centre: line.cost_centre_name,
+          year: String(p.yr),
+          period: `${monthNames[p.mo]} ${p.yr}`,
+          basis: basisTag === 'historical' ? 'historical (from workbook)' : 'computed (invoiced + fee)',
+          vended_raw: Number(line.vended_raw_amount),
+          recharge_amount: Number(line.recharge_amount),
+          pro_rata_diff: Math.round((Number(line.recharge_amount) - Number(line.vended_raw_amount)) * 100) / 100,
+        });
+      }
+    }
+  }
+
+  const groups = new Map();
+  for (const row of flatRows) {
+    const key = dims.map((d) => row[d]).join('|');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+
+  const columns = dims.map((d) => ({ key: d, label: RECHARGE_DIMENSIONS[d], numeric: false }))
+    .concat(metrics.map((m) => ({ key: m, label: RECHARGE_METRICS[m], numeric: true, money: true })));
+
+  const outRows = [];
+  for (const [, groupRows] of groups) {
+    const outRow = {};
+    dims.forEach((d) => { outRow[d] = groupRows[0][d]; });
+    metrics.forEach((m) => {
+      outRow[m] = Math.round(groupRows.reduce((s, r) => s + Number(r[m] || 0), 0) * 100) / 100;
+    });
+    outRows.push(outRow);
+  }
+  outRows.sort((a, b) => b[metrics[0]] - a[metrics[0]]);
+  return { columns, rows: outRows.slice(0, 500) };
+}
+
+let lastResult = { columns: [], rows: [] };
+
+async function runReport() {
+  const dims = Object.keys(dimBoxes).filter((k) => dimBoxes[k].checked);
+  const metrics = Object.keys(metricBoxes).filter((k) => metricBoxes[k].checked);
+  const resultsCard = document.getElementById('results-card');
+  const resultBody = document.getElementById('result-body');
+  resultsCard.style.display = '';
+
+  if (dims.length === 0 || metrics.length === 0) {
+    resultBody.innerHTML = '<p class="empty">Pick at least one dimension and one metric, then run the report.</p>';
+    return;
+  }
+  resultBody.innerHTML = '<p class="loading">Running…</p>';
+
+  try {
+    lastResult = source === 'vended_detail'
+      ? await runVendedReport(dims, metrics)
+      : await runRechargeReport(dims, metrics);
+  } catch (e) {
+    resultBody.innerHTML = `<p class="empty">Error: ${e.message}</p>`;
+    return;
+  }
+
+  if (lastResult.rows.length === 0) {
+    resultBody.innerHTML = '<p class="empty">No data matches these filters.</p>';
+    return;
+  }
+
+  const headHtml = lastResult.columns.map((c) => `<th class="${c.numeric ? 'num' : ''}">${esc(c.label)}</th>`).join('');
+  const bodyHtml = lastResult.rows.map((row) => {
+    const cells = lastResult.columns.map((c) => {
+      const v = row[c.key] ?? '';
+      const display = c.money ? `£${money(v)}` : esc(String(v));
+      return `<td class="${c.numeric ? 'num' : ''}">${display}</td>`;
+    }).join('');
+    return `<tr>${cells}</tr>`;
+  }).join('');
+
+  resultBody.innerHTML = `
+    <table><thead><tr>${headHtml}</tr></thead><tbody>${bodyHtml}</tbody></table>
+    ${lastResult.rows.length >= 500 ? '<p class="basis">Showing the first 500 rows — narrow the slicers for a complete view.</p>' : ''}
+    <button type="button" class="download-link" id="download-btn">Download CSV</button>
+  `;
+  document.getElementById('download-btn').addEventListener('click', downloadReportCsv);
+}
+
+function downloadReportCsv() {
+  const headers = lastResult.columns.map((c) => c.label);
+  const rows = lastResult.rows.map((row) => lastResult.columns.map((c) => row[c.key] ?? ''));
+  downloadCsv(`report_${source}.csv`, buildCsv(headers, rows));
+}
+
+document.getElementById('src-vended').addEventListener('click', (e) => { e.preventDefault(); setSource('vended_detail'); });
+document.getElementById('src-recharge').addEventListener('click', (e) => { e.preventDefault(); setSource('recharge_summary'); });
+document.getElementById('run-btn').addEventListener('click', runReport);
+
+(async () => {
+  await buildSlicers();
+  setSource('vended_detail');
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JDE Export — Vending Dashboard</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="topbar-root"></div>
+<main>
+  <h1>Vending / Consumables Recharge Dashboard</h1>
+  <p class="subtitle">Runs on Supabase — no cloud servers of your own to maintain.</p>
+
+  <form class="filters" id="filter-form">
+    <div>
+      <label for="site">Site</label>
+      <select id="site" name="site"></select>
+    </div>
+    <div>
+      <label for="group">Recharge group</label>
+      <select id="group" name="group"></select>
+    </div>
+    <div>
+      <label for="period">Period</label>
+      <select id="period" name="period"></select>
+    </div>
+  </form>
+
+  <div class="card">
+    <h2 id="result-heading">&nbsp;</h2>
+    <div id="result-body"><p class="loading">Loading…</p></div>
+  </div>
+</main>
+
+<script type="module">
+import { supabase, renderNav, MONTH_NAMES, money, csvNumber, buildCsv, downloadCsv } from './layout.js';
+
+renderNav('export');
+
+const siteSelect = document.getElementById('site');
+const groupSelect = document.getElementById('group');
+const periodSelect = document.getElementById('period');
+const resultHeading = document.getElementById('result-heading');
+const resultBody = document.getElementById('result-body');
+
+let groups = []; // [{group_name, site_name}]
+let currentExport = { lines: [], basis: '' };
+
+async function loadGroups() {
+  const { data, error } = await supabase
+    .from('jde_groups')
+    .select('group_name, sites(site_name)')
+    .order('group_name');
+  if (error) { resultBody.innerHTML = `<p class="empty">Error loading groups: ${error.message}</p>`; return; }
+  groups = data.map((g) => ({ group_name: g.group_name, site_name: g.sites.site_name }));
+
+  const siteNames = Array.from(new Set(groups.map((g) => g.site_name))).sort();
+  siteSelect.innerHTML = siteNames.map((s) => `<option value="${s}">${s}</option>`).join('');
+  populateGroupsForSite(siteNames[0]);
+}
+
+function populateGroupsForSite(siteName) {
+  const opts = groups.filter((g) => g.site_name === siteName);
+  groupSelect.innerHTML = opts.map((g) => `<option value="${g.group_name}">${g.group_name}</option>`).join('');
+}
+
+async function populatePeriodsForGroup(groupName) {
+  const { data, error } = await supabase.rpc('get_group_periods', { p_group_name: groupName });
+  if (error || !data || data.length === 0) {
+    periodSelect.innerHTML = '';
+    return;
+  }
+  periodSelect.innerHTML = data
+    .map((p) => `<option value="${p.yr}-${p.mo}">${MONTH_NAMES[p.mo]} ${p.yr}</option>`)
+    .join('');
+}
+
+async function runExport() {
+  const groupName = groupSelect.value;
+  const [yr, mo] = (periodSelect.value || '').split('-').map(Number);
+  if (!groupName || !yr || !mo) {
+    resultBody.innerHTML = '<p class="empty">No recharge lines for this group/period.</p>';
+    return;
+  }
+  resultHeading.textContent = `${groupName} — ${MONTH_NAMES[mo]} ${yr}`;
+  resultBody.innerHTML = '<p class="loading">Loading…</p>';
+
+  const { data, error } = await supabase.rpc('get_jde_export', {
+    p_group_name: groupName, p_year: yr, p_month: mo,
+  });
+
+  if (error) {
+    resultBody.innerHTML = `<p class="empty">Error: ${error.message}</p>`;
+    currentExport = { lines: [], basis: '' };
+    return;
+  }
+  if (!data || data.length === 0) {
+    resultBody.innerHTML = '<p class="empty">No recharge lines for this group/period.</p>';
+    currentExport = { lines: [], basis: '' };
+    return;
+  }
+
+  currentExport = { lines: data, basis: data[0].basis };
+
+  let totalRaw = 0, totalRecharge = 0;
+  const rowsHtml = data.map((line) => {
+    totalRaw += Number(line.vended_raw_amount);
+    totalRecharge += Number(line.recharge_amount);
+    return `
+      <tr>
+        <td>${escapeHtml(line.cost_centre_name)}</td>
+        <td>${escapeHtml(line.jde_code)}</td>
+        <td class="num">£${money(line.vended_raw_amount)}</td>
+        <td class="num">£${money(line.recharge_amount)}</td>
+      </tr>`;
+  }).join('');
+
+  resultBody.innerHTML = `
+    <p class="basis">Basis: ${escapeHtml(currentExport.basis)}</p>
+    <table>
+      <thead><tr><th>Cost Centre</th><th>JDE Code</th><th class="num">Vended (raw)</th><th class="num">Recharge Amount</th></tr></thead>
+      <tbody>
+        ${rowsHtml}
+        <tr class="total"><td>TOTAL</td><td></td><td class="num">£${money(totalRaw)}</td><td class="num">£${money(totalRecharge)}</td></tr>
+      </tbody>
+    </table>
+    <button type="button" class="download-link" id="download-btn">Download CSV</button>
+  `;
+
+  document.getElementById('download-btn').addEventListener('click', downloadJdeCsv);
+}
+
+function downloadJdeCsv() {
+  const groupName = groupSelect.value;
+  const [yr, mo] = (periodSelect.value || '').split('-').map(Number);
+  // Column order/names match Database Prototype/JDE_Export_Example_Newark_May2026.csv
+  // exactly -- this is the file that gets uploaded straight into JDE.
+  const headers = ['cost_centre_name', 'jde_code', 'vended_raw_amount', 'recharge_amount', 'basis'];
+  const rows = currentExport.lines.map((line) => [
+    line.cost_centre_name,
+    line.jde_code,
+    csvNumber(line.vended_raw_amount),
+    csvNumber(line.recharge_amount),
+    line.basis,
+  ]);
+  const csv = buildCsv(headers, rows);
+  downloadCsv(`JDE_Export_${groupName}_${yr}-${mo}.csv`, csv);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+siteSelect.addEventListener('change', async () => {
+  populateGroupsForSite(siteSelect.value);
+  await populatePeriodsForGroup(groupSelect.value);
+  await runExport();
+});
+groupSelect.addEventListener('change', async () => {
+  await populatePeriodsForGroup(groupSelect.value);
+  await runExport();
+});
+periodSelect.addEventListener('change', runExport);
+
+(async () => {
+  await loadGroups();
+  await populatePeriodsForGroup(groupSelect.value);
+  await runExport();
+})();
+</script>
+</body>
+</html>
