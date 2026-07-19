@@ -40,7 +40,7 @@ async function buildSlicers() {
   const [{ data: groups }, { data: periods }, { data: pgNames }] = await Promise.all([
     supabase.from('jde_groups').select('group_name, sites(site_name)').order('group_name'),
     supabase.rpc('get_invoiced_periods'),
-    supabase.rpc('get_product_groups'),
+    supabase.rpc('get_invoiced_product_groups'),
   ]);
 
   const siteNames = Array.from(new Set((groups || []).map((g) => g.sites.site_name))).sort();
