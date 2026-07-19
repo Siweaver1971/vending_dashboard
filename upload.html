@@ -144,7 +144,7 @@ async function loadVendedReferenceData() {
   const [sitesR, groupsR, itemsR, cribsR, employeesR, ccR] = await Promise.all([
     supabase.from('sites').select('site_key, site_name'),
     supabase.from('jde_groups').select('jde_group_key, site_key, group_name, raw_site_id, raw_crib_area'),
-    supabase.rpc('get_items_current'),
+    supabase.rpc('get_items_all'),
     fetchAllFrom(() => supabase.from('crib_locations').select('crib, crib_area, crib_bin, site_key')),
     fetchAllFrom(() => supabase.from('employees').select('employee_key, employee_id, employee_name')),
     fetchAllFrom(() => supabase.from('cost_centres').select('cost_centre_key, jde_group_key, cost_centre_name').eq('is_current', 1)),
@@ -173,8 +173,22 @@ function findCribLocationKeyByBin(bin) {
   // resolution below only needs site/group, so this is intentionally omitted.
   return null;
 }
-function findItem(itemCode) {
-  return refItems.find((i) => i.item_code === itemCode) || null;
+function findItem(itemCode, txnDateIso) {
+    // refItems now holds the FULL price history per item (see get_items_all), so we can
+    // pick the price that was actually in effect on the transaction's own date -- this
+    // matters whenever a price change (e.g. 13 Jul 2026) falls inside an uploaded period.
+    const versions = refItems.filter((i) => i.item_code === itemCode);
+    if (versions.length === 0) return null;
+    if (txnDateIso) {
+          const hit = versions.find((i) =>
+                  txnDateIso >= i.effective_from && (i.effective_to === null || txnDateIso < i.effective_to)
+                );
+          if (hit) return hit;
+    }
+    // Fallback (no date, or date outside every recorded range): use the current version,
+    // or else whichever version is latest.
+    return versions.find((i) => i.is_current === 1)
+      || versions.slice().sort((a, b) => (a.effective_from < b.effective_from ? 1 : -1))[0];
 }
 function findEmployee(employeeId) {
   if (!employeeId) return null;
@@ -229,7 +243,7 @@ async function handleVendedFile(file) {
     if (!siteKey) reasons.push('Unknown crib ' + crib + ' (and no matching Site ID ' + siteId + ')');
     const group = siteKey ? findGroupForSite(siteKey, cribArea) : null;
     if (siteKey && !group) reasons.push('Could not determine recharge group for crib area "' + cribArea + '"');
-    const item = findItem(itemCode);
+    const item = findItem(itemCode, dateObj ? isoDate(dateObj) : null);
     if (!item) reasons.push('Item code "' + itemCode + '" not found in Products');
     if (!dateObj) reasons.push('Unreadable date');
 
