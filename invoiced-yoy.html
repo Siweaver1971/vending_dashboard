@@ -10,24 +10,20 @@
 <div id="topbar-root"></div>
 <main>
   <h1>Invoiced — Year on Year</h1>
-  <p class="subtitle">Compare invoiced (supplier) cost by recharge group across any two custom 12-month periods, month by month — pick where each period starts, e.g. Jan 2024 or Mar 2025. Use this to show a customer whether they're being charged less than the year before.</p>
+  <p class="subtitle">Compare invoiced (supplier) cost by recharge group across any two 12-month periods that start on the same month — e.g. Jan 2024 vs Jan 2025, or Mar 2025 vs Mar 2026. Use this to show a customer whether they're being charged less than the year before.</p>
 
-  <div class="slicer-row" id="slicer-row"></div>
-
-  <div class="slicer-row" style="margin-top:4px;">
-    <div class="slicer" style="min-width:220px;">
-      <h4>Period A (earlier) — starts</h4>
-      <div style="display:flex; gap:8px;">
-        <select id="month-a"></select>
-        <select id="year-a"></select>
-      </div>
+  <div class="slicer-row" id="slicer-row">
+    <div class="slicer" style="min-width:140px;">
+      <h4>Starting month</h4>
+      <select id="start-month"></select>
     </div>
-    <div class="slicer" style="min-width:220px;">
-      <h4>Period B (later) — starts</h4>
-      <div style="display:flex; gap:8px;">
-        <select id="month-b"></select>
-        <select id="year-b"></select>
-      </div>
+    <div class="slicer" style="min-width:140px;">
+      <h4>Year A (earlier)</h4>
+      <select id="year-a"></select>
+    </div>
+    <div class="slicer" style="min-width:140px;">
+      <h4>Year B (later)</h4>
+      <select id="year-b"></select>
     </div>
   </div>
   <div style="margin-bottom:20px;"><button type="button" id="apply-btn">Compare</button></div>
@@ -49,9 +45,8 @@ renderNav('invoiced-yoy');
 
 const slicerRow = document.getElementById('slicer-row');
 const resultBody = document.getElementById('result-body');
-const monthASelect = document.getElementById('month-a');
+const startMonthSelect = document.getElementById('start-month');
 const yearASelect = document.getElementById('year-a');
-const monthBSelect = document.getElementById('month-b');
 const yearBSelect = document.getElementById('year-b');
 
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -72,13 +67,9 @@ function periodRangeLabel(y, m) {
 }
 
 async function buildControls() {
-  const [{ data: groups }, { data: boundsRows }] = await Promise.all([
-    supabase.from('jde_groups').select('group_name, sites(site_name)').order('group_name'),
+  const [{ data: boundsRows }] = await Promise.all([
     supabase.rpc('get_invoiced_date_bounds'),
   ]);
-
-  const groupNames = (groups || []).map((g) => g.group_name);
-  groupSlicer = renderSlicer(slicerRow, { label: 'Recharge Group', options: groupNames, selected: [] });
 
   const bounds = (boundsRows && boundsRows[0]) || {};
   const minDate = bounds.min_date ? new Date(bounds.min_date) : new Date();
@@ -86,9 +77,7 @@ async function buildControls() {
   const minYear = minDate.getFullYear();
   const maxYear = maxDate.getFullYear();
 
-  const monthOptions = MONTHS.map((m, i) => `<option value="${i + 1}">${m}</option>`).join('');
-  monthASelect.innerHTML = monthOptions;
-  monthBSelect.innerHTML = monthOptions;
+  startMonthSelect.innerHTML = MONTHS.map((m, i) => `<option value="${i + 1}">${m}</option>`).join('');
 
   const yearOptions = [];
   for (let y = minYear; y <= maxYear; y++) yearOptions.push(y);
@@ -96,16 +85,20 @@ async function buildControls() {
   yearASelect.innerHTML = yearOptionsHtml;
   yearBSelect.innerHTML = yearOptionsHtml;
 
-  // Default: Period B = the most recent complete 12 months of data; Period A = the 12 months before that.
+  // Default: same starting month as the most recent complete 12-month window, comparing
+  // that year against the year before it -- i.e. equivalent to the old "last two years" default.
   const maxM = maxDate.getMonth() + 1;
   const maxY = maxDate.getFullYear();
   const bStart = addMonths(maxY, maxM, -11);
-  const aStart = addMonths(bStart.y, bStart.m, -12);
 
-  monthBSelect.value = bStart.m;
+  startMonthSelect.value = bStart.m;
   yearBSelect.value = Math.max(minYear, bStart.y);
-  monthASelect.value = aStart.m;
-  yearASelect.value = Math.max(minYear, aStart.y);
+  yearASelect.value = Math.max(minYear, bStart.y - 1);
+
+  // Group filter is appended into the same row as the month/year pickers.
+  const { data: groups } = await supabase.from('jde_groups').select('group_name, sites(site_name)').order('group_name');
+  const groupNames = (groups || []).map((g) => g.group_name);
+  groupSlicer = renderSlicer(slicerRow, { label: 'Recharge Group', options: groupNames, selected: [] });
 }
 
 function toNullIfEmpty(arr) {
@@ -115,21 +108,20 @@ function toNullIfEmpty(arr) {
 async function runQuery() {
   resultBody.innerHTML = '<p class="loading">Loading…</p>';
 
-  const monthA = parseInt(monthASelect.value, 10);
+  const startMonth = parseInt(startMonthSelect.value, 10);
   const yearA = parseInt(yearASelect.value, 10);
-  const monthB = parseInt(monthBSelect.value, 10);
   const yearB = parseInt(yearBSelect.value, 10);
 
-  if (!monthA || !yearA || !monthB || !yearB) {
+  if (!startMonth || !yearA || !yearB) {
     resultBody.innerHTML = '<p class="empty">No data available yet.</p>';
     return;
   }
-  const startA = `${yearA}-${pad2(monthA)}-01`;
-  const startB = `${yearB}-${pad2(monthB)}-01`;
-  if (startA === startB) {
-    resultBody.innerHTML = '<p class="empty">Pick two different starting months to compare.</p>';
+  if (yearA === yearB) {
+    resultBody.innerHTML = '<p class="empty">Pick two different years to compare.</p>';
     return;
   }
+  const startA = `${yearA}-${pad2(startMonth)}-01`;
+  const startB = `${yearB}-${pad2(startMonth)}-01`;
 
   const { data, error } = await supabase.rpc('get_invoiced_period_summary', {
     p_groups: toNullIfEmpty(groupSlicer.getSelected()),
@@ -148,11 +140,11 @@ async function runQuery() {
     return;
   }
 
-  const rangeA = periodRangeLabel(yearA, monthA);
-  const rangeB = periodRangeLabel(yearB, monthB);
+  const rangeA = periodRangeLabel(yearA, startMonth);
+  const rangeB = periodRangeLabel(yearB, startMonth);
 
   const groupNames = Array.from(new Set(rows.map((r) => r.group_name))).sort();
-  const html = groupNames.map((gname) => renderGroupTable(gname, rows.filter((r) => r.group_name === gname), rangeA, rangeB)).join('');
+  const html = groupNames.map((gname) => renderGroupTable(gname, rows.filter((r) => r.group_name === gname), startMonth, rangeA, rangeB)).join('');
 
   const grandA = rows.filter((r) => r.period === 'A').reduce((s, r) => s + Number(r.total_value || 0), 0);
   const grandB = rows.filter((r) => r.period === 'B').reduce((s, r) => s + Number(r.total_value || 0), 0);
@@ -169,15 +161,15 @@ async function runQuery() {
   `;
 }
 
-function renderGroupTable(groupName, groupRows, rangeA, rangeB) {
+function renderGroupTable(groupName, groupRows, startMonth, rangeA, rangeB) {
   const byOffset = {};
-  for (let i = 0; i < 12; i++) byOffset[i] = { a: 0, b: 0, aLabel: null, bLabel: null };
+  for (let i = 0; i < 12; i++) byOffset[i] = { a: 0, b: 0 };
   for (const r of groupRows) {
     const off = Number(r.month_offset);
     const bucket = byOffset[off];
     if (!bucket) continue;
-    if (r.period === 'A') { bucket.a += Number(r.total_value || 0); bucket.aLabel = r.month_label; }
-    if (r.period === 'B') { bucket.b += Number(r.total_value || 0); bucket.bLabel = r.month_label; }
+    if (r.period === 'A') bucket.a += Number(r.total_value || 0);
+    if (r.period === 'B') bucket.b += Number(r.total_value || 0);
   }
 
   let totalA = 0, totalB = 0;
@@ -190,12 +182,10 @@ function renderGroupTable(groupName, groupRows, rangeA, rangeB) {
     const pct = a !== 0 ? (diff / a) * 100 : (b !== 0 ? null : 0);
     const hasData = a !== 0 || b !== 0;
     if (!hasData) return '';
-    const label = bucket.aLabel && bucket.bLabel
-      ? (bucket.aLabel === bucket.bLabel ? bucket.aLabel : `${bucket.aLabel} / ${bucket.bLabel}`)
-      : (bucket.aLabel || bucket.bLabel || `Month ${i + 1}`);
+    const mname = MONTHS[(startMonth - 1 + i) % 12];
     return `
       <tr>
-        <td>${esc(label)}</td>
+        <td>${mname}</td>
         <td class="num">£${money(a)}</td>
         <td class="num">£${money(b)}</td>
         <td class="num ${diff <= 0 ? 'good' : 'bad'}">${diff <= 0 ? '−' : '+'}£${money(Math.abs(diff))}</td>
@@ -210,7 +200,7 @@ function renderGroupTable(groupName, groupRows, rangeA, rangeB) {
     <h3 style="margin-top:24px;">${esc(groupName)}</h3>
     <table>
       <thead>
-        <tr><th>Month</th><th class="num">Period A (${esc(rangeA)})</th><th class="num">Period B (${esc(rangeB)})</th><th class="num">£ Change</th><th class="num">% Change</th></tr>
+        <tr><th>Month</th><th class="num">${esc(rangeA)}</th><th class="num">${esc(rangeB)}</th><th class="num">£ Change</th><th class="num">% Change</th></tr>
       </thead>
       <tbody>${monthRows}
         <tr class="total">
