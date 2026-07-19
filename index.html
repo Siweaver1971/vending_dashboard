@@ -56,7 +56,7 @@ async function loadGroups() {
     .select('group_name, sites(site_name)')
     .order('group_name');
   if (error) { resultBody.innerHTML = `<p class="empty">Error loading groups: ${error.message}</p>`; return; }
-  groups = data.map((g) => ({ group_name: g.group_name, site_name: g.sites.site_name }));
+  groups = data.filter((g) => g.group_name !== 'ABN').map((g) => ({ group_name: g.group_name, site_name: g.sites.site_name }));
 
   const siteNames = Array.from(new Set(groups.map((g) => g.site_name))).sort();
   siteSelect.innerHTML = siteNames.map((s) => `<option value="${s}">${s}</option>`).join('');
