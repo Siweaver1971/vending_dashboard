@@ -56,6 +56,7 @@ const VENDED_DIMENSIONS = {
   group:       { label: 'Recharge Group',get: (r) => r.group_name },
   cost_centre: { label: 'Cost Centre',   get: (r) => r.cost_centre_name },
   item:        { label: 'Item',          get: (r) => r.item_code },
+  product_group: { label: 'Product Group', get: (r) => r.product_group || 'Unknown' },
   employee:    { label: 'Employee',      get: (r) => r.employee_name || 'Unknown' },
   year:        { label: 'Year',          get: (r) => String(r.txn_date).slice(0, 4) },
   period:      { label: 'Month',         get: (r) => String(r.txn_date).slice(0, 7) },
@@ -77,7 +78,7 @@ const RECHARGE_METRICS = {
 };
 
 let source = 'vended_detail';
-let siteSlicer, groupSlicer, periodSlicer;
+let siteSlicer, groupSlicer, periodSlicer, productGroupSlicer;
 let allGroups = []; // [{group_name, site_name}]
 
 function esc(s) {
@@ -144,11 +145,15 @@ async function buildSlicers() {
   const { data: periods } = await supabase.rpc('get_vended_periods');
   const periodOpts = (periods || []).map((p) => [p.period_key, p.period_label]);
 
+  const { data: productGroups } = await supabase.rpc('get_product_groups');
+  const productGroupNames = (productGroups || []).map((p) => p.product_group);
+
   const slicerRow = document.getElementById('slicer-row');
   slicerRow.innerHTML = '';
   siteSlicer = renderSlicer(slicerRow, { label: 'Site', options: siteNames, selected: [] });
   groupSlicer = renderSlicer(slicerRow, { label: 'Recharge Group', options: groupNames, selected: [] });
   periodSlicer = renderSlicer(slicerRow, { label: 'Period', options: periodOpts, selected: [] });
+  productGroupSlicer = renderSlicer(slicerRow, { label: 'Product Group', options: productGroupNames, selected: [] });
 }
 
 async function runVendedReport(dims, metrics) {
@@ -157,7 +162,7 @@ async function runVendedReport(dims, metrics) {
     p_groups: toNullIfEmpty(groupSlicer.getSelected()),
     p_periods: toNullIfEmpty(periodSlicer.getSelected()),
     p_cost_centres: null,
-    p_product_groups: null,
+    p_product_groups: toNullIfEmpty(productGroupSlicer.getSelected()),
   });
   if (error) throw error;
   let rows = data || [];
@@ -176,13 +181,22 @@ async function runVendedReport(dims, metrics) {
     groups.get(key).push(row);
   }
 
-  const columns = dims.map((d) => ({ key: d, label: VENDED_DIMENSIONS[d].label, numeric: false }))
-    .concat(metrics.map((m) => ({ key: m, label: VENDED_METRICS[m].label, numeric: true, money: VENDED_METRICS[m].money })));
+  // When "Item" is selected as a dimension, automatically show its description alongside
+  // the item code -- an item code on its own isn't meaningful without knowing what it is.
+  const columns = [];
+  dims.forEach((d) => {
+    columns.push({ key: d, label: VENDED_DIMENSIONS[d].label, numeric: false });
+    if (d === 'item') columns.push({ key: 'item_description', label: 'Item Description', numeric: false });
+  });
+  columns.push(...metrics.map((m) => ({ key: m, label: VENDED_METRICS[m].label, numeric: true, money: VENDED_METRICS[m].money })));
 
   const outRows = [];
   for (const [, groupRows] of groups) {
     const outRow = {};
-    dims.forEach((d) => { outRow[d] = VENDED_DIMENSIONS[d].get(groupRows[0]); });
+    dims.forEach((d) => {
+      outRow[d] = VENDED_DIMENSIONS[d].get(groupRows[0]);
+      if (d === 'item') outRow.item_description = groupRows[0].description || '';
+    });
     metrics.forEach((m) => { outRow[m] = Math.round(VENDED_METRICS[m].agg(groupRows) * 100) / 100; });
     outRows.push(outRow);
   }

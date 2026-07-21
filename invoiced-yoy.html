@@ -10,20 +10,22 @@
 <div id="topbar-root"></div>
 <main>
   <h1>Invoiced — Year on Year</h1>
-  <p class="subtitle">Compare invoiced (supplier) cost by recharge group across any two 12-month periods that start on the same month — e.g. Jan 2024 vs Jan 2025, or Mar 2025 vs Mar 2026. Use this to show a customer whether they're being charged less than the year before.</p>
+  <p class="subtitle">Compare invoiced (supplier) cost by recharge group across any two date ranges — the two periods don't need to be the same length. e.g. Jan 2024 – Dec 2024 vs Jan 2025 – Dec 2025, or Mar 2025 – May 2025 vs Jan 2026 – Jun 2026. Use this to show a customer whether they're being charged less than the year before.</p>
 
   <div class="slicer-row" id="slicer-row">
-    <div class="slicer" style="min-width:140px;">
-      <h4>Starting month</h4>
-      <select id="start-month"></select>
+    <div class="slicer" style="min-width:220px;">
+      <h4>Period A</h4>
+      <label style="font-size:11px;color:#666;margin-bottom:2px;">Start</label>
+      <input type="month" id="a-start" style="width:100%;margin-bottom:8px;">
+      <label style="font-size:11px;color:#666;margin-bottom:2px;">End</label>
+      <input type="month" id="a-end" style="width:100%;">
     </div>
-    <div class="slicer" style="min-width:140px;">
-      <h4>Year A (earlier)</h4>
-      <select id="year-a"></select>
-    </div>
-    <div class="slicer" style="min-width:140px;">
-      <h4>Year B (later)</h4>
-      <select id="year-b"></select>
+    <div class="slicer" style="min-width:220px;">
+      <h4>Period B</h4>
+      <label style="font-size:11px;color:#666;margin-bottom:2px;">Start</label>
+      <input type="month" id="b-start" style="width:100%;margin-bottom:8px;">
+      <label style="font-size:11px;color:#666;margin-bottom:2px;">End</label>
+      <input type="month" id="b-end" style="width:100%;">
     </div>
   </div>
   <div style="margin-bottom:20px;"><button type="button" id="apply-btn">Compare</button></div>
@@ -45,57 +47,63 @@ renderNav('invoiced-yoy');
 
 const slicerRow = document.getElementById('slicer-row');
 const resultBody = document.getElementById('result-body');
-const startMonthSelect = document.getElementById('start-month');
-const yearASelect = document.getElementById('year-a');
-const yearBSelect = document.getElementById('year-b');
+const aStartInput = document.getElementById('a-start');
+const aEndInput = document.getElementById('a-end');
+const bStartInput = document.getElementById('b-start');
+const bEndInput = document.getElementById('b-end');
 
-const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
 let groupSlicer;
 
 function pad2(n) { return String(n).padStart(2, '0'); }
-
+function monthValue(y, m) { return `${y}-${pad2(m)}`; }
+function parseMonthValue(str) {
+  if (!str) return null;
+  const [y, m] = str.split('-').map(Number);
+  return { y, m };
+}
 // Add `delta` months to (year, month) [month is 1-12]. Returns {y, m}.
 function addMonths(y, m, delta) {
   const idx = y * 12 + (m - 1) + delta;
   return { y: Math.floor(idx / 12), m: (idx % 12) + 1 };
 }
-function periodRangeLabel(y, m) {
-  const end = addMonths(y, m, 11);
-  return `${MONTHS_SHORT[m - 1]} ${y} – ${MONTHS_SHORT[end.m - 1]} ${end.y}`;
+// Number of months spanned from (y1,m1) to (y2,m2) inclusive.
+function monthSpan(y1, m1, y2, m2) {
+  return (y2 * 12 + (m2 - 1)) - (y1 * 12 + (m1 - 1)) + 1;
+}
+function periodRangeLabel(y1, m1, y2, m2) {
+  if (y1 === y2 && m1 === m2) return `${MONTHS_SHORT[m1 - 1]} ${y1}`;
+  return `${MONTHS_SHORT[m1 - 1]} ${y1} – ${MONTHS_SHORT[m2 - 1]} ${y2}`;
 }
 
 async function buildControls() {
-  const [{ data: boundsRows }] = await Promise.all([
-    supabase.rpc('get_invoiced_date_bounds'),
-  ]);
+  const { data: boundsRows } = await supabase.rpc('get_invoiced_date_bounds');
 
   const bounds = (boundsRows && boundsRows[0]) || {};
   const minDate = bounds.min_date ? new Date(bounds.min_date) : new Date();
   const maxDate = bounds.max_date ? new Date(bounds.max_date) : new Date();
-  const minYear = minDate.getFullYear();
-  const maxYear = maxDate.getFullYear();
+  const minY = minDate.getFullYear(), minM = minDate.getMonth() + 1;
+  const maxY = maxDate.getFullYear(), maxM = maxDate.getMonth() + 1;
+  const minVal = monthValue(minY, minM);
+  const maxVal = monthValue(maxY, maxM);
+  [aStartInput, aEndInput, bStartInput, bEndInput].forEach((el) => { el.min = minVal; el.max = maxVal; });
 
-  startMonthSelect.innerHTML = MONTHS.map((m, i) => `<option value="${i + 1}">${m}</option>`).join('');
-
-  const yearOptions = [];
-  for (let y = minYear; y <= maxYear; y++) yearOptions.push(y);
-  const yearOptionsHtml = yearOptions.map((y) => `<option value="${y}">${y}</option>`).join('');
-  yearASelect.innerHTML = yearOptionsHtml;
-  yearBSelect.innerHTML = yearOptionsHtml;
-
-  // Default: same starting month as the most recent complete 12-month window, comparing
-  // that year against the year before it -- i.e. equivalent to the old "last two years" default.
-  const maxM = maxDate.getMonth() + 1;
-  const maxY = maxDate.getFullYear();
+  // Default: Period B = most recent complete 12 months; Period A = the 12 months before that
+  // -- equivalent to the old "last two years, same start month" default -- but every field
+  // stays freely editable afterwards.
+  const bEnd = { y: maxY, m: maxM };
   const bStart = addMonths(maxY, maxM, -11);
+  const aEnd = addMonths(bStart.y, bStart.m, -1);
+  const aStartRaw = addMonths(aEnd.y, aEnd.m, -11);
+  const aStart = (aStartRaw.y * 12 + aStartRaw.m) < (minY * 12 + minM) ? { y: minY, m: minM } : aStartRaw;
 
-  startMonthSelect.value = bStart.m;
-  yearBSelect.value = Math.max(minYear, bStart.y);
-  yearASelect.value = Math.max(minYear, bStart.y - 1);
+  aStartInput.value = monthValue(aStart.y, aStart.m);
+  aEndInput.value = monthValue(aEnd.y, aEnd.m);
+  bStartInput.value = monthValue(bStart.y, bStart.m);
+  bEndInput.value = monthValue(bEnd.y, bEnd.m);
 
-  // Group filter is appended into the same row as the month/year pickers.
+  // Group filter is appended into the same row as the date pickers.
   const { data: groups } = await supabase.from('jde_groups').select('group_name, sites(site_name)').order('group_name');
   const groupNames = (groups || []).map((g) => g.group_name);
   groupSlicer = renderSlicer(slicerRow, { label: 'Recharge Group', options: groupNames, selected: [] });
@@ -108,25 +116,35 @@ function toNullIfEmpty(arr) {
 async function runQuery() {
   resultBody.innerHTML = '<p class="loading">Loading…</p>';
 
-  const startMonth = parseInt(startMonthSelect.value, 10);
-  const yearA = parseInt(yearASelect.value, 10);
-  const yearB = parseInt(yearBSelect.value, 10);
+  const a1 = parseMonthValue(aStartInput.value);
+  const a2 = parseMonthValue(aEndInput.value);
+  const b1 = parseMonthValue(bStartInput.value);
+  const b2 = parseMonthValue(bEndInput.value);
 
-  if (!startMonth || !yearA || !yearB) {
-    resultBody.innerHTML = '<p class="empty">No data available yet.</p>';
+  if (!a1 || !a2 || !b1 || !b2) {
+    resultBody.innerHTML = '<p class="empty">Pick a start and end month for both periods.</p>';
     return;
   }
-  if (yearA === yearB) {
-    resultBody.innerHTML = '<p class="empty">Pick two different years to compare.</p>';
+  if ((a1.y * 12 + a1.m) > (a2.y * 12 + a2.m)) {
+    resultBody.innerHTML = '<p class="empty">Period A: start must be before (or the same as) end.</p>';
     return;
   }
-  const startA = `${yearA}-${pad2(startMonth)}-01`;
-  const startB = `${yearB}-${pad2(startMonth)}-01`;
+  if ((b1.y * 12 + b1.m) > (b2.y * 12 + b2.m)) {
+    resultBody.innerHTML = '<p class="empty">Period B: start must be before (or the same as) end.</p>';
+    return;
+  }
+
+  const startA = `${a1.y}-${pad2(a1.m)}-01`;
+  const endA = `${a2.y}-${pad2(a2.m)}-01`;
+  const startB = `${b1.y}-${pad2(b1.m)}-01`;
+  const endB = `${b2.y}-${pad2(b2.m)}-01`;
 
   const { data, error } = await supabase.rpc('get_invoiced_period_summary', {
     p_groups: toNullIfEmpty(groupSlicer.getSelected()),
     p_start_a: startA,
+    p_end_a: endA,
     p_start_b: startB,
+    p_end_b: endB,
   });
 
   if (error) {
@@ -140,11 +158,13 @@ async function runQuery() {
     return;
   }
 
-  const rangeA = periodRangeLabel(yearA, startMonth);
-  const rangeB = periodRangeLabel(yearB, startMonth);
+  const lenA = monthSpan(a1.y, a1.m, a2.y, a2.m);
+  const lenB = monthSpan(b1.y, b1.m, b2.y, b2.m);
+  const rangeA = periodRangeLabel(a1.y, a1.m, a2.y, a2.m);
+  const rangeB = periodRangeLabel(b1.y, b1.m, b2.y, b2.m);
 
   const groupNames = Array.from(new Set(rows.map((r) => r.group_name))).sort();
-  const html = groupNames.map((gname) => renderGroupTable(gname, rows.filter((r) => r.group_name === gname), startMonth, rangeA, rangeB)).join('');
+  const html = groupNames.map((gname) => renderGroupTable(gname, rows.filter((r) => r.group_name === gname), a1, b1, lenA, lenB, rangeA, rangeB)).join('');
 
   const grandA = rows.filter((r) => r.period === 'A').reduce((s, r) => s + Number(r.total_value || 0), 0);
   const grandB = rows.filter((r) => r.period === 'B').reduce((s, r) => s + Number(r.total_value || 0), 0);
@@ -156,14 +176,16 @@ async function runQuery() {
       All selected groups combined: Period A (${rangeA}) total £${money(grandA)} vs Period B (${rangeB}) total £${money(grandB)}
       — ${grandDiff <= 0 ? 'a saving of' : 'an increase of'} £${money(Math.abs(grandDiff))}
       ${grandPct !== null ? ` (${grandPct <= 0 ? '' : '+'}${grandPct.toFixed(1)}%)` : ''}.
+      ${lenA !== lenB ? `<br>Note: Period A spans ${lenA} month${lenA === 1 ? '' : 's'} and Period B spans ${lenB} month${lenB === 1 ? '' : 's'} — totals aren't like-for-like unless the lengths match.` : ''}
     </p>
     ${html}
   `;
 }
 
-function renderGroupTable(groupName, groupRows, startMonth, rangeA, rangeB) {
+function renderGroupTable(groupName, groupRows, a1, b1, lenA, lenB, rangeA, rangeB) {
+  const maxLen = Math.max(lenA, lenB);
   const byOffset = {};
-  for (let i = 0; i < 12; i++) byOffset[i] = { a: 0, b: 0 };
+  for (let i = 0; i < maxLen; i++) byOffset[i] = { a: 0, b: 0 };
   for (const r of groupRows) {
     const off = Number(r.month_offset);
     const bucket = byOffset[off];
@@ -173,23 +195,29 @@ function renderGroupTable(groupName, groupRows, startMonth, rangeA, rangeB) {
   }
 
   let totalA = 0, totalB = 0;
-  const monthRows = Array.from({ length: 12 }, (_, i) => {
+  const monthRows = Array.from({ length: maxLen }, (_, i) => {
     const bucket = byOffset[i];
-    const a = bucket.a, b = bucket.b;
-    totalA += a;
-    totalB += b;
-    const diff = b - a;
-    const pct = a !== 0 ? (diff / a) * 100 : (b !== 0 ? null : 0);
-    const hasData = a !== 0 || b !== 0;
-    if (!hasData) return '';
-    const mname = MONTHS[(startMonth - 1 + i) % 12];
+    const inA = i < lenA, inB = i < lenB;
+    const a = inA ? bucket.a : null;
+    const b = inB ? bucket.b : null;
+    if (inA) totalA += a;
+    if (inB) totalB += b;
+    const diff = (inA && inB) ? (b - a) : null;
+    const pct = (diff !== null && a !== 0) ? (diff / a) * 100 : null;
+
+    const aMonth = inA ? addMonths(a1.y, a1.m, i) : null;
+    const bMonth = inB ? addMonths(b1.y, b1.m, i) : null;
+    const aLabel = aMonth ? `${MONTHS_SHORT[aMonth.m - 1]} ${aMonth.y}` : '—';
+    const bLabel = bMonth ? `${MONTHS_SHORT[bMonth.m - 1]} ${bMonth.y}` : '—';
+
     return `
       <tr>
-        <td>${mname}</td>
-        <td class="num">£${money(a)}</td>
-        <td class="num">£${money(b)}</td>
-        <td class="num ${diff <= 0 ? 'good' : 'bad'}">${diff <= 0 ? '−' : '+'}£${money(Math.abs(diff))}</td>
-        <td class="num ${diff <= 0 ? 'good' : 'bad'}">${pct === null ? '—' : (pct <= 0 ? '' : '+') + pct.toFixed(1) + '%'}</td>
+        <td>${aLabel}</td>
+        <td class="num">${inA ? '£' + money(a) : '—'}</td>
+        <td>${bLabel}</td>
+        <td class="num">${inB ? '£' + money(b) : '—'}</td>
+        <td class="num ${diff === null ? '' : (diff <= 0 ? 'good' : 'bad')}">${diff === null ? '—' : (diff <= 0 ? '−' : '+') + '£' + money(Math.abs(diff))}</td>
+        <td class="num ${diff === null ? '' : (diff <= 0 ? 'good' : 'bad')}">${pct === null ? '—' : (pct <= 0 ? '' : '+') + pct.toFixed(1) + '%'}</td>
       </tr>`;
   }).join('');
 
@@ -200,13 +228,12 @@ function renderGroupTable(groupName, groupRows, startMonth, rangeA, rangeB) {
     <h3 style="margin-top:24px;">${esc(groupName)}</h3>
     <table>
       <thead>
-        <tr><th>Month</th><th class="num">${esc(rangeA)}</th><th class="num">${esc(rangeB)}</th><th class="num">£ Change</th><th class="num">% Change</th></tr>
+        <tr><th>${esc(rangeA)} — Month</th><th class="num">Value</th><th>${esc(rangeB)} — Month</th><th class="num">Value</th><th class="num">£ Change</th><th class="num">% Change</th></tr>
       </thead>
       <tbody>${monthRows}
         <tr class="total">
-          <td>Total</td>
-          <td class="num">£${money(totalA)}</td>
-          <td class="num">£${money(totalB)}</td>
+          <td colspan="2">Total (${esc(rangeA)})</td>
+          <td colspan="2">Total (${esc(rangeB)})</td>
           <td class="num ${totalDiff <= 0 ? 'good' : 'bad'}">${totalDiff <= 0 ? '−' : '+'}£${money(Math.abs(totalDiff))}</td>
           <td class="num ${totalDiff <= 0 ? 'good' : 'bad'}">${totalPct === null ? '—' : (totalPct <= 0 ? '' : '+') + totalPct.toFixed(1) + '%'}</td>
         </tr>
