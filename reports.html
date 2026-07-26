@@ -33,7 +33,13 @@
         <div class="text-filters-grid" id="text-filters"></div>
       </div>
     </div>
-    <div class="run-row"><button type="button" id="run-btn">Run Report</button></div>
+    <div class="run-row">
+      <label for="f-topn" style="margin-right:6px;">Top N results</label>
+      <input type="number" id="f-topn" min="1" step="1" placeholder="e.g. 10" style="width:90px;margin-right:16px;">
+      <label for="f-rankby" style="margin-right:6px;">Ranked by</label>
+      <select id="f-rankby" style="margin-right:16px;"></select>
+      <button type="button" id="run-btn">Run Report</button>
+    </div>
   </div>
 
   <div class="card" id="results-card" style="display:none;">
@@ -105,6 +111,18 @@ function renderCheckList(container, options) {
 
 let dimBoxes = {}, metricBoxes = {};
 
+function updateRankByOptions() {
+  const rankBySelect = document.getElementById('f-rankby');
+  const metrics = source === 'vended_detail' ? VENDED_METRICS : RECHARGE_METRICS;
+  const checkedKeys = Object.keys(metricBoxes).filter((k) => metricBoxes[k].checked);
+  const prevValue = rankBySelect.value;
+  rankBySelect.innerHTML = checkedKeys.map((k) => {
+    const label = typeof metrics[k] === 'string' ? metrics[k] : metrics[k].label;
+    return `<option value="${k}">${esc(label)}</option>`;
+  }).join('');
+  if (checkedKeys.includes(prevValue)) rankBySelect.value = prevValue;
+}
+
 function setSource(newSource) {
   source = newSource;
   document.getElementById('src-vended').classList.toggle('active', source === 'vended_detail');
@@ -114,6 +132,8 @@ function setSource(newSource) {
   const metrics = source === 'vended_detail' ? VENDED_METRICS : RECHARGE_METRICS;
   dimBoxes = renderCheckList(document.getElementById('dims-list'), dims);
   metricBoxes = renderCheckList(document.getElementById('metrics-list'), metrics);
+  Object.values(metricBoxes).forEach((cb) => cb.addEventListener('change', updateRankByOptions));
+  updateRankByOptions();
 
   const textFilters = document.getElementById('text-filters');
   if (source === 'vended_detail') {
@@ -200,8 +220,7 @@ async function runVendedReport(dims, metrics) {
     metrics.forEach((m) => { outRow[m] = Math.round(VENDED_METRICS[m].agg(groupRows) * 100) / 100; });
     outRows.push(outRow);
   }
-  outRows.sort((a, b) => b[metrics[0]] - a[metrics[0]]);
-  return { columns, rows: outRows.slice(0, 500) };
+  return { columns, rows: outRows };
 }
 
 async function runRechargeReport(dims, metrics) {
@@ -267,8 +286,7 @@ async function runRechargeReport(dims, metrics) {
     });
     outRows.push(outRow);
   }
-  outRows.sort((a, b) => b[metrics[0]] - a[metrics[0]]);
-  return { columns, rows: outRows.slice(0, 500) };
+  return { columns, rows: outRows };
 }
 
 let lastResult = { columns: [], rows: [] };
@@ -286,8 +304,9 @@ async function runReport() {
   }
   resultBody.innerHTML = '<p class="loading">Running…</p>';
 
+  let full;
   try {
-    lastResult = source === 'vended_detail'
+    full = source === 'vended_detail'
       ? await runVendedReport(dims, metrics)
       : await runRechargeReport(dims, metrics);
   } catch (e) {
@@ -295,10 +314,26 @@ async function runReport() {
     return;
   }
 
-  if (lastResult.rows.length === 0) {
+  if (full.rows.length === 0) {
     resultBody.innerHTML = '<p class="empty">No data matches these filters.</p>';
+    lastResult = { columns: full.columns, rows: [] };
     return;
   }
+
+  // Rank the grouped results by whichever ticked metric is selected in "Ranked by"
+  // (defaults to the first ticked metric), then cap to "Top N results" if the user
+  // set one -- otherwise fall back to the original 500-row display cap.
+  const metricsObj = source === 'vended_detail' ? VENDED_METRICS : RECHARGE_METRICS;
+  const rankBy = document.getElementById('f-rankby').value || metrics[0];
+  full.rows.sort((a, b) => Number(b[rankBy] || 0) - Number(a[rankBy] || 0));
+
+  const topNRaw = parseInt(document.getElementById('f-topn').value, 10);
+  const limit = (Number.isInteger(topNRaw) && topNRaw > 0) ? Math.min(topNRaw, 5000) : 500;
+  const shownRows = full.rows.slice(0, limit);
+  lastResult = { columns: full.columns, rows: shownRows };
+
+  const rankLabelObj = metricsObj[rankBy];
+  const rankLabelText = typeof rankLabelObj === 'string' ? rankLabelObj : rankLabelObj.label;
 
   const headHtml = lastResult.columns.map((c) => `<th class="${c.numeric ? 'num' : ''}">${esc(c.label)}</th>`).join('');
   const bodyHtml = lastResult.rows.map((row) => {
@@ -312,7 +347,9 @@ async function runReport() {
 
   resultBody.innerHTML = `
     <table><thead><tr>${headHtml}</tr></thead><tbody>${bodyHtml}</tbody></table>
-    ${lastResult.rows.length >= 500 ? '<p class="basis">Showing the first 500 rows — narrow the slicers for a complete view.</p>' : ''}
+    ${full.rows.length > shownRows.length
+      ? `<p class="basis">Showing top ${shownRows.length.toLocaleString()} of ${full.rows.length.toLocaleString()} results, ranked by ${esc(rankLabelText)}. Change "Top N results" to see more or fewer.</p>`
+      : `<p class="basis">${shownRows.length.toLocaleString()} result${shownRows.length === 1 ? '' : 's'}, ranked by ${esc(rankLabelText)}.</p>`}
     <button type="button" class="download-link" id="download-btn">Download CSV</button>
   `;
   document.getElementById('download-btn').addEventListener('click', downloadReportCsv);
