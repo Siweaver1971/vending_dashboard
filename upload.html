@@ -94,8 +94,22 @@ function toDateObj(v) {
     if (!isNaN(d)) return d;
   }
   if (typeof v === 'string' && v.trim()) {
-    const d = new Date(v);
-    if (!isNaN(d)) return d;
+    const s = v.trim();
+    // Portal Data exports use DD/MM/YYYY (UK format). new Date(string) assumes
+    // MM/DD/YYYY and either misreads or rejects these -- parse explicitly instead.
+    const dmy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$/);
+    if (dmy) {
+      const day = parseInt(dmy[1], 10), month = parseInt(dmy[2], 10), year = parseInt(dmy[3], 10);
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        const d = new Date(year, month - 1, day);
+        if (!isNaN(d)) return d;
+      }
+    }
+    // Fallback: ISO format (YYYY-MM-DD[THH:MM:SS]), which new Date() parses reliably.
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
+      const d = new Date(s);
+      if (!isNaN(d)) return d;
+    }
   }
   return null;
 }
