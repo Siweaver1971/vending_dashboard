@@ -95,21 +95,23 @@ function toDateObj(v) {
   }
   if (typeof v === 'string' && v.trim()) {
     const s = v.trim();
-    // Portal Data exports use DD/MM/YYYY (UK format). new Date(string) assumes
-    // MM/DD/YYYY and either misreads or rejects these -- parse explicitly instead.
-    const dmy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$/);
+    // Portal Data CSV exports write dates as DD/MM/YYYY. new Date(string) on a
+    // plain-text (non-Excel-cell) value like this is parsed as MM/DD/YYYY by
+    // the browser, which silently produces the wrong date (or an overflowed
+    // one) for any day > 12 -- this previously corrupted an entire month's
+    // worth of vended data on CSV upload. Parse DD/MM/YYYY explicitly first.
+    const dmy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
     if (dmy) {
-      const day = parseInt(dmy[1], 10), month = parseInt(dmy[2], 10), year = parseInt(dmy[3], 10);
+      const day = Number(dmy[1]);
+      const month = Number(dmy[2]);
+      const year = Number(dmy[3]);
       if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
         const d = new Date(year, month - 1, day);
-        if (!isNaN(d)) return d;
+        if (!isNaN(d) && d.getMonth() === month - 1) return d;
       }
     }
-    // Fallback: ISO format (YYYY-MM-DD[THH:MM:SS]), which new Date() parses reliably.
-    if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
-      const d = new Date(s);
-      if (!isNaN(d)) return d;
-    }
+    const d = new Date(s);
+    if (!isNaN(d)) return d;
   }
   return null;
 }
@@ -188,21 +190,21 @@ function findCribLocationKeyByBin(bin) {
   return null;
 }
 function findItem(itemCode, txnDateIso) {
-    // refItems now holds the FULL price history per item (see get_items_all), so we can
-    // pick the price that was actually in effect on the transaction's own date -- this
-    // matters whenever a price change (e.g. 13 Jul 2026) falls inside an uploaded period.
-    const versions = refItems.filter((i) => i.item_code === itemCode);
-    if (versions.length === 0) return null;
-    if (txnDateIso) {
-          const hit = versions.find((i) =>
-                  txnDateIso >= i.effective_from && (i.effective_to === null || txnDateIso < i.effective_to)
-                );
-          if (hit) return hit;
-    }
-    // Fallback (no date, or date outside every recorded range): use the current version,
-    // or else whichever version is latest.
-    return versions.find((i) => i.is_current === 1)
-      || versions.slice().sort((a, b) => (a.effective_from < b.effective_from ? 1 : -1))[0];
+  // refItems now holds the FULL price history per item (see get_items_all), so we can
+  // pick the price that was actually in effect on the transaction's own date -- this
+  // matters whenever a price change (e.g. 13 Jul 2026) falls inside an uploaded period.
+  const versions = refItems.filter((i) => i.item_code === itemCode);
+  if (versions.length === 0) return null;
+  if (txnDateIso) {
+    const hit = versions.find((i) =>
+      txnDateIso >= i.effective_from && (i.effective_to === null || txnDateIso < i.effective_to)
+    );
+    if (hit) return hit;
+  }
+  // Fallback (no date, or date outside every recorded range): use the current version,
+  // or else whichever version is latest.
+  return versions.find((i) => i.is_current === 1)
+    || versions.slice().sort((a, b) => (a.effective_from < b.effective_from ? 1 : -1))[0];
 }
 function findEmployee(employeeId) {
   if (!employeeId) return null;
