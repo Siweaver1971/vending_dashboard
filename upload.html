@@ -182,13 +182,13 @@ function findGroupForSite(siteKey, cribArea) {
   if (groups.length === 1) return groups[0];
   if (groups.length === 0) return null;
   const area = (cribArea || '').trim().toLowerCase();
-  return groups.find((g) => (g.raw_crib_area || '').trim().toLowerCase() === area) || null;
+  return groups.find((g) => (g.raw_crib_area || '').trim().toLowerCase() === area) || groups.find((g) => { const base = (g.raw_crib_area || '').trim().toLowerCase(); return base && area === base + '-sb'; }) || null;
 }
 function findCribLocationKeyByBin(bin) {
   // not exposed with a key in our select (we didn't select crib_location_key) -- left null;
   // resolution below only needs site/group, so this is intentionally omitted.
   return null;
-}
+h
 function findItem(itemCode, txnDateIso) {
   // refItems now holds the FULL price history per item (see get_items_all), so we can
   // pick the price that was actually in effect on the transaction's own date -- this
