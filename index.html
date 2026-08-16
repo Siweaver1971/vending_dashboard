@@ -137,16 +137,28 @@ async function runExport() {
 function downloadJdeCsv() {
   const groupName = groupSelect.value;
   const [yr, mo] = (periodSelect.value || '').split('-').map(Number);
-  // Column order/names match Database Prototype/JDE_Export_Example_Newark_May2026.csv
-  // exactly -- this is the file that gets uploaded straight into JDE.
-  const headers = ['cost_centre_name', 'jde_code', 'vended_raw_amount', 'recharge_amount', 'basis'];
-  const rows = currentExport.lines.map((line) => [
-    line.cost_centre_name,
-    line.jde_code,
-    csvNumber(line.vended_raw_amount),
-    csvNumber(line.recharge_amount),
-    line.basis,
-  ]);
+  // Column order/names match Simon's SOP paste-in format: Total (vended raw),
+  // Pro Rata % (share of vended total), Pro Rata (recharge), qty (always 1),
+  // UOM (blank), Cost (= recharge), Line type (always "j"), Description
+  // ("<Month> <Year> Vending"), Cost Centre Name, Cost Code.
+  const description = `${MONTH_NAMES[mo]} ${yr} Vending`;
+  const totalVended = currentExport.lines.reduce((s, l) => s + Number(l.vended_raw_amount), 0);
+  const headers = ['Total', 'Pro Rata %', 'Pro Rata', 'qty', 'UOM', 'Cost', 'Line type', 'Description', 'Cost Centre Name', 'Cost Code'];
+  const rows = currentExport.lines.map((line) => {
+    const pct = totalVended ? (Number(line.vended_raw_amount) / totalVended * 100) : 0;
+    return [
+      csvNumber(line.vended_raw_amount),
+      `${pct.toFixed(2)}%`,
+      csvNumber(line.recharge_amount),
+      1,
+      '',
+      csvNumber(line.recharge_amount),
+      'j',
+      description,
+      line.cost_centre_name,
+      line.jde_code,
+    ];
+  });
   const csv = buildCsv(headers, rows);
   downloadCsv(`JDE_Export_${groupName}_${yr}-${mo}.csv`, csv);
 }
