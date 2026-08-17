@@ -21,8 +21,19 @@
   <!-- ===================== VENDED PANEL ===================== -->
   <section id="panel-vended">
     <div class="card">
-      <h2>1. Choose file</h2>
-      <p class="basis">Portal Data export (.xlsx or .csv). Only rows with <strong>ISSUE</strong> in the Type column are imported — RECVE/ADJUS/other rows are ignored. Price always comes from the Products table, never from this file.</p>
+      <h2>1. Choose period and file</h2>
+      <p class="basis">Pick the JDE period type covering this file's data (Campaign / Juice Run / Gap) — this sets which JDE cost codes the export uses for the month(s) involved. Portal Data export (.xlsx or .csv). Only rows with <strong>ISSUE</strong> in the Type column are imported — RECVE/ADJUS/other rows are ignored. Price always comes from the Products table, never from this file.</p>
+      <div style="display:flex; gap:16px; flex-wrap:wrap; align-items:end; margin-bottom:14px;">
+        <div>
+          <label for="vended-period-letter">Period type</label>
+          <select id="vended-period-letter">
+            <option value="">Select a period type…</option>
+            <option value="c">Campaign</option>
+            <option value="j">Juice Run</option>
+            <option value="m">Gap</option>
+          </select>
+        </div>
+      </div>
       <input type="file" id="vended-file" accept=".xlsx,.xls,.csv">
       <p id="vended-file-status" class="basis"></p>
     </div>
@@ -47,6 +58,15 @@
         <div>
           <label for="invoiced-period">Period</label>
           <select id="invoiced-period"></select>
+        </div>
+        <div>
+          <label for="invoiced-period-letter">Period type</label>
+          <select id="invoiced-period-letter">
+            <option value="">Select a period type…</option>
+            <option value="c">Campaign</option>
+            <option value="j">Juice Run</option>
+            <option value="m">Gap</option>
+          </select>
         </div>
       </div>
       <input type="file" id="invoiced-file" accept=".csv,.xlsx,.xls">
@@ -84,6 +104,24 @@ function esc(s) {
   }[c]));
 }
 function pad2(n) { return String(n).padStart(2, '0'); }
+
+const PERIOD_NAMES = { c: 'Campaign', j: 'Juice Run', m: 'Gap' };
+async function getExistingPeriodLetter(year, month) {
+  const { data, error } = await supabase.rpc('get_campaign_period', { p_year: year, p_month: month });
+  if (error || !data || data.length === 0) return null;
+  return data[0].period_letter;
+}
+async function upsertCampaignPeriod(year, month, letter) {
+  const { error } = await supabase.rpc('upsert_campaign_period', {
+    p_year: year, p_month: month, p_period_letter: letter, p_period_name: PERIOD_NAMES[letter],
+  });
+  if (error) throw error;
+}
+function parsePeriodLabel(label) {
+  const names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const [mon, yr] = label.split(' ');
+  return { year: Number(yr), month: names.indexOf(mon) + 1 };
+}
 
 function toDateObj(v) {
   if (v instanceof Date && !isNaN(v)) return v;
@@ -188,7 +226,7 @@ function findCribLocationKeyByBin(bin) {
   // not exposed with a key in our select (we didn't select crib_location_key) -- left null;
   // resolution below only needs site/group, so this is intentionally omitted.
   return null;
-h
+}
 function findItem(itemCode, txnDateIso) {
   // refItems now holds the FULL price history per item (see get_items_all), so we can
   // pick the price that was actually in effect on the transaction's own date -- this
@@ -218,6 +256,12 @@ function findCostCentre(jdeGroupKey, name) {
 
 async function handleVendedFile(file) {
   const statusEl = document.getElementById('vended-file-status');
+  const vendedPeriodLetter = document.getElementById('vended-period-letter').value;
+  if (!vendedPeriodLetter) {
+    statusEl.textContent = 'Pick a period type first.';
+    document.getElementById('vended-file').value = '';
+    return;
+  }
   statusEl.textContent = 'Reading file…';
   vendedSourceFile = file.name;
 
@@ -358,6 +402,15 @@ document.getElementById('vended-commit-btn').addEventListener('click', async () 
   statusEl.textContent = 'Creating new employees / cost centres…';
 
   try {
+    const vendedPeriodLetter = document.getElementById('vended-period-letter').value;
+    const vendedMonths = new Set(vendedResolvedRows.map((r) => r.txn_date.slice(0, 7)));
+    statusEl.textContent = 'Setting period codes…';
+    for (const ym of vendedMonths) {
+      const [y, m] = ym.split('-').map(Number);
+      await upsertCampaignPeriod(y, m, vendedPeriodLetter);
+    }
+
+    statusEl.textContent = 'Creating new employees / cost centres…';
     const employeeKeyMap = new Map();
     for (const [empId, name] of vendedNewEmployees.entries()) {
       const { data, error } = await supabase.rpc('upsert_employee', { p_employee_id: empId, p_employee_name: name });
@@ -421,6 +474,14 @@ function populatePeriodSelect() {
   sel.innerHTML = '<option value="">Select a period…</option>' + opts.map((o) => `<option value="${o}">${o}</option>`).join('');
 }
 populatePeriodSelect();
+document.getElementById('invoiced-period').addEventListener('change', async () => {
+  const val = document.getElementById('invoiced-period').value;
+  const letterSel = document.getElementById('invoiced-period-letter');
+  if (!val) { letterSel.value = ''; return; }
+  const { year, month } = parsePeriodLabel(val);
+  const existing = await getExistingPeriodLetter(year, month);
+  letterSel.value = existing || '';
+});
 
 async function loadInvoicedReferenceData() {
   const [groupsR, sitesR, mapR] = await Promise.all([
@@ -445,6 +506,12 @@ async function handleInvoicedFile(file) {
   const period = document.getElementById('invoiced-period').value;
   if (!period) {
     statusEl.textContent = 'Pick a period first.';
+    document.getElementById('invoiced-file').value = '';
+    return;
+  }
+  const invoicedPeriodLetter = document.getElementById('invoiced-period-letter').value;
+  if (!invoicedPeriodLetter) {
+    statusEl.textContent = 'Pick a period type first.';
     document.getElementById('invoiced-file').value = '';
     return;
   }
@@ -567,10 +634,15 @@ document.getElementById('invoiced-commit-btn').addEventListener('click', async (
   const btn = document.getElementById('invoiced-commit-btn');
   const statusEl = document.getElementById('invoiced-commit-status');
   const period = document.getElementById('invoiced-period').value;
+  const invoicedPeriodLetter = document.getElementById('invoiced-period-letter').value;
   btn.disabled = true;
-  statusEl.textContent = 'Saving new account assignments…';
+  statusEl.textContent = 'Setting period codes…';
 
   try {
+    const { year, month } = parsePeriodLabel(period);
+    await upsertCampaignPeriod(year, month, invoicedPeriodLetter);
+
+    statusEl.textContent = 'Saving new account assignments…';
     for (const p of invoicedUnresolvedPairs.values()) {
       if (!p.jde_group_key) continue;
       const { error } = await supabase.rpc('assign_invoiced_account', {
